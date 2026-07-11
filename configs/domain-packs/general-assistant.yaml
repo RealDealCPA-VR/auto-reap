@@ -1,0 +1,114 @@
+# Example domain pack: a general personal-assistant workload — chat, drafting,
+# summarization, structured extraction, and light calendar tooling.
+# Same schema as cpa-firm.yaml; author your own or let `reap-lab init` draft one.
+
+name: general-assistant
+description: >
+  Everyday assistant mix: summarizing long material, drafting and rewriting
+  messages, answering questions, extracting contact details into JSON, intent
+  classification, and simple scheduling through function calls.
+include_refusal_suites: true
+
+domains:
+  - name: summarize
+    description: Summarize documents, threads, and articles at a requested length.
+    task_type: open_ended
+    weight: 2.5
+    long_context: true
+    prompt_guidance: >
+      Meeting notes, email threads, reports, articles — including documents long
+      enough to exercise 16k+ contexts. Rubrics reward coverage of the key points,
+      requested length/format, and faithful attribution; penalize invented details.
+    tags: [summarization]
+
+  - name: email_drafting
+    description: Draft and rewrite messages in a requested tone.
+    task_type: open_ended
+    weight: 2.0
+    prompt_guidance: >
+      Replies, follow-ups, introductions, and difficult messages (declining,
+      apologizing, chasing). Rubrics reward tone match, brevity, and a clear
+      call to action.
+    tags: [writing]
+
+  - name: qa
+    description: Answer general knowledge and how-to questions accurately.
+    task_type: open_ended
+    weight: 2.0
+    prompt_guidance: >
+      Practical questions with verifiable answers plus advice-style asks. Rubrics
+      reward correctness, calibrated uncertainty, and directness; penalize
+      fabricated specifics.
+
+  - name: classify_intent
+    description: Classify a user message into exactly one intent label.
+    task_type: exact
+    weight: 1.5
+    prompt_guidance: >
+      Short user messages routed to one intent from the list in the prompt
+      (e.g. schedule, remind, search, purchase, complaint, smalltalk). Include
+      ambiguous and typo-ridden messages as edge cases. Gold = the intent label.
+    tags: [routing]
+
+  - name: extract_contacts
+    description: Extract structured contact info from unstructured text.
+    task_type: json_schema
+    weight: 1.0
+    prompt_guidance: >
+      Email signatures, bios, and messages containing contact details; some
+      partially malformed. Extract people with their organization and role.
+    json_schema:
+      type: object
+      required: [contacts]
+      properties:
+        contacts:
+          type: array
+          items:
+            type: object
+            required: [name, organization]
+            properties:
+              name: { type: string }
+              organization: { type: string }
+              role: { type: string }
+
+  - name: scheduling_tools
+    description: Choose the right calendar tool call for a scheduling request.
+    task_type: tool_call
+    weight: 1.0
+    prompt_guidance: >
+      Natural scheduling asks (book, move, check availability) whose correct
+      first action is exactly one calendar tool call.
+    tools:
+      - type: function
+        function:
+          name: create_event
+          description: Create a calendar event for a person at a time.
+          parameters:
+            type: object
+            required: [title, start]
+            properties:
+              title: { type: string }
+              start: { type: string, description: "ISO 8601 datetime" }
+              duration_minutes: { type: number }
+      - type: function
+        function:
+          name: find_availability
+          description: Find open time slots across one or more calendars.
+          parameters:
+            type: object
+            required: [attendees, window]
+            properties:
+              attendees:
+                type: array
+                items: { type: string }
+              window: { type: string, description: "e.g. next week, 2026-07-14..18" }
+      - type: function
+        function:
+          name: move_event
+          description: Reschedule an existing calendar event to a new time.
+          parameters:
+            type: object
+            required: [event_id, new_start]
+            properties:
+              event_id: { type: string }
+              new_start: { type: string }

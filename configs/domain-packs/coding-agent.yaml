@@ -1,0 +1,118 @@
+# Example domain pack: a coding-agent workload — code assistance, review,
+# triage, structured extraction, and agentic repo tooling via function calls.
+# Same schema as cpa-firm.yaml; author your own or let `reap-lab init` draft one.
+
+name: coding-agent
+description: >
+  Software-engineering assistant workload: writing and reviewing code, triaging
+  bug reports, extracting structured API inventories, and driving repository
+  tools (search, test, patch) through schema-valid function calls.
+include_refusal_suites: true
+
+domains:
+  - name: code_assist
+    description: Write or modify code to satisfy a natural-language request.
+    task_type: open_ended
+    weight: 3.0
+    prompt_guidance: >
+      Small, self-contained tasks across Python and TypeScript: implement a function,
+      fix a described bug, refactor for clarity, add error handling. Rubrics reward
+      correct behavior, idiomatic style, and a brief explanation; penalize invented
+      APIs and unrequested rewrites.
+    tags: [coding]
+
+  - name: code_review
+    description: Review a diff or source file and identify defects and improvements.
+    task_type: open_ended
+    weight: 2.0
+    long_context: true
+    prompt_guidance: >
+      Realistic diffs and whole files, some long enough to exercise 16k+ contexts.
+      Rubrics reward finding genuine defects (correctness first), severity ranking,
+      and actionable suggestions; penalize nitpick-only reviews and hallucinated issues.
+    tags: [review]
+
+  - name: bug_triage
+    description: Classify an incoming bug report into exactly one category.
+    task_type: exact
+    weight: 1.5
+    prompt_guidance: >
+      Bug reports with stack traces, repro steps, or user complaints — some vague or
+      truncated as edge cases. Gold = one category label from the list given in the
+      prompt (e.g. crash, regression, performance, security, ui, docs).
+    tags: [triage]
+
+  - name: api_extraction
+    description: Extract a structured inventory of functions from docs or source.
+    task_type: json_schema
+    weight: 1.0
+    prompt_guidance: >
+      Documentation pages or source snippets; extract the module name and its public
+      functions with one-line summaries. Include partially malformed docs as edge cases.
+    json_schema:
+      type: object
+      required: [module, functions]
+      properties:
+        module: { type: string }
+        functions:
+          type: array
+          items:
+            type: object
+            required: [name, summary]
+            properties:
+              name: { type: string }
+              summary: { type: string }
+
+  - name: repo_tools
+    description: Pick the right repository tool call for a development task.
+    task_type: tool_call
+    weight: 2.0
+    prompt_guidance: >
+      Dispatcher-style requests where the correct first action is one tool call:
+      search the codebase, run the tests, or apply a patch. One correct tool per item.
+    tools: &repo_tools
+      - type: function
+        function:
+          name: search_code
+          description: Search the repository for a pattern or symbol.
+          parameters:
+            type: object
+            required: [query]
+            properties:
+              query: { type: string }
+              glob: { type: string, description: "optional filename filter, e.g. **/*.py" }
+      - type: function
+        function:
+          name: run_tests
+          description: Run the project's test suite, optionally filtered to a path.
+          parameters:
+            type: object
+            required: []
+            properties:
+              path: { type: string }
+              keyword: { type: string }
+      - type: function
+        function:
+          name: apply_patch
+          description: Apply a unified-diff patch to a file in the repository.
+          parameters:
+            type: object
+            required: [path, diff]
+            properties:
+              path: { type: string }
+              diff: { type: string }
+
+  - name: ci_agent
+    description: Plan the first tool call for continuous-integration chores.
+    task_type: tool_call
+    weight: 1.0
+    prompt_guidance: >
+      CI-flavored requests (a test started failing, a lint pattern must be found,
+      a hotfix patch must land) that map to exactly one of the repo tools.
+    tools: *repo_tools
+
+  - name: general_chat
+    description: General utility chat — quick questions, summaries, rewrites.
+    task_type: open_ended
+    weight: 1.0
+    prompt_guidance: Everyday assistant tasks unrelated to code, for distribution balance.
