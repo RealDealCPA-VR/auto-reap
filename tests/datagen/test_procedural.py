@@ -6,7 +6,7 @@ import json
 
 import jsonschema
 
-from reaplab.core.records import TaskType
+from reaplab.core.records import EvalRecord, TaskType
 from reaplab.datagen.dedup import filter_near_duplicates
 from reaplab.datagen.procedural import generate_procedural_items, generate_refusal_suite
 from reaplab.datagen.synthdoc import (
@@ -17,7 +17,6 @@ from reaplab.datagen.synthdoc import (
     estimate_tokens,
     with_long_document,
 )
-from reaplab.core.records import EvalRecord
 
 
 def _spec(pack, name):

@@ -22,7 +22,6 @@ from pathlib import Path
 from reaplab.core.config import SweepSpec
 from reaplab.core.jsonl import iter_jsonl
 from reaplab.core.records import CalibrationRecord
-
 from reaplab.prune.errors import PruneError
 
 #: Basename of the converted dataset file inside the dataset folder.

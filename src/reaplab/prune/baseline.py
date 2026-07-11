@@ -22,10 +22,9 @@ from reaplab.core.hashing import artifact_hash
 from reaplab.core.paths import Workspace
 from reaplab.core.records import ArtifactManifest
 from reaplab.core.state import StateDB
-
 from reaplab.prune import gguf
-from reaplab.prune.profiles import resolve_hf_model_dir
 from reaplab.prune.errors import PruneError
+from reaplab.prune.profiles import resolve_hf_model_dir
 from reaplab.prune.runner import _load_manifest, _manifest_dir, _save_manifest, _tool_versions, model_slug
 from reaplab.prune.stages import baseline_artifact_id, convert_stage
 

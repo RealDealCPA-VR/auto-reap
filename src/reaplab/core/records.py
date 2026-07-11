@@ -6,7 +6,7 @@ Versioned per PRD FR-1.6: every record carries schema_version.
 from __future__ import annotations
 
 import enum
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -110,5 +110,5 @@ class ArtifactManifest(BaseModel):
     wall_clock_s: float | None = None
     peak_mem_gb: float | None = None
     versions: dict[str, str] = Field(default_factory=dict)  # library/tool versions
-    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
     schema_version: str = SCHEMA_VERSION

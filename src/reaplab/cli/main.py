@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
 
 import typer
 from rich.console import Console
@@ -72,10 +71,10 @@ def demo(
 @app.command()
 def init(
     out_dir: Path = typer.Option(Path("."), "--out", help="Directory for the generated YAMLs"),
-    name: Optional[str] = typer.Option(None, help="Project name (kebab-case)"),
-    model_id: Optional[str] = typer.Option(None, help="Base MoE model HF id"),
-    describe: Optional[str] = typer.Option(None, help="Plain-English workload description"),
-    provider: Optional[str] = typer.Option(
+    name: str | None = typer.Option(None, help="Project name (kebab-case)"),
+    model_id: str | None = typer.Option(None, help="Base MoE model HF id"),
+    describe: str | None = typer.Option(None, help="Plain-English workload description"),
+    provider: str | None = typer.Option(
         None, help="Provider kind: claude-cli | openai-compat | anthropic-api | mock"
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Non-interactive; use flags/defaults"),
@@ -96,7 +95,7 @@ def init(
 
 @app.command()
 def doctor(
-    spec: Optional[Path] = typer.Argument(None, help="Optional sweep YAML to validate against"),
+    spec: Path | None = typer.Argument(None, help="Optional sweep YAML to validate against"),
     strict: bool = typer.Option(False, help="Exit 1 when any check FAILs"),
 ) -> None:
     """Check the environment: providers, llama.cpp, GPU, LM Studio, disk."""
@@ -231,7 +230,7 @@ def convert(spec_path: Path = SPEC_ARG) -> None:
 def eval_cmd(
     spec_path: Path = SPEC_ARG,
     gguf: Path = typer.Option(..., exists=True, help="A GGUF to evaluate against your eval set"),
-    artifact_id: Optional[str] = typer.Option(None, help="Label for the results (default: filename)"),
+    artifact_id: str | None = typer.Option(None, help="Label for the results (default: filename)"),
 ) -> None:
     """Evaluate ANY local GGUF against your domain pack's eval set.
 

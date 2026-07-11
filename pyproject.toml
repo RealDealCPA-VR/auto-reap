@@ -47,4 +47,9 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
-ignore = ["E501"]
+# E501: line length is advisory; UP042: str-Enums stay str+Enum for pydantic/JSON ergonomics
+ignore = ["E501", "UP042"]
+
+[tool.ruff.lint.per-file-ignores]
+# typer's documented idiom is function calls (typer.Option/Argument) in defaults
+"src/reaplab/cli/*" = ["B008"]
