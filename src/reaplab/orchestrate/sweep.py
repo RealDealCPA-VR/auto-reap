@@ -49,6 +49,13 @@ BuildFn = Callable[..., list[ArtifactManifest]]
 EvaluateFn = Callable[..., dict[str, Any]]
 
 
+def _component_state(spec: SweepSpec, workspace: Workspace) -> StateDB:
+    """Short-lived StateDB connection for component calls. Components record their own
+    fine-grained stage progress; run_sweep's connection tracks the coarse stages. Both
+    write small committed transactions, so the concurrent SQLite connections are safe."""
+    return StateDB(workspace.state_db(spec.config_hash()))
+
+
 def _default_datagen() -> DatagenFn:
     try:
         from reaplab.datagen import generate_datasets  # noqa: PLC0415 - lazy by design
@@ -57,7 +64,13 @@ def _default_datagen() -> DatagenFn:
             "The datagen component (reaplab.datagen.generate_datasets) is unavailable: "
             f"{e}. Reinstall reap-lab (`uv sync`) or pass datagen_fn explicitly."
         ) from e
-    return generate_datasets
+
+    def _adapter(spec: SweepSpec, workspace: Workspace) -> tuple[Path, Path]:
+        # run_sweep owns the ("datagen", "datasets") stage record; the component
+        # resolves its provider from spec.generator internally.
+        return generate_datasets(spec, workspace)
+
+    return _adapter
 
 
 def _default_build_baseline() -> BuildFn:
@@ -68,7 +81,12 @@ def _default_build_baseline() -> BuildFn:
             "The prune component (reaplab.prune.build_baseline) is unavailable: "
             f"{e}. Reinstall reap-lab (`uv sync`) or pass build_baseline_fn explicitly."
         ) from e
-    return build_baseline
+
+    def _adapter(spec: SweepSpec, workspace: Workspace) -> list[ArtifactManifest]:
+        with _component_state(spec, workspace) as state:
+            return build_baseline(spec, workspace, state)
+
+    return _adapter
 
 
 def _default_build_artifacts() -> BuildFn:
@@ -79,7 +97,29 @@ def _default_build_artifacts() -> BuildFn:
             "The prune component (reaplab.prune.build_artifacts) is unavailable: "
             f"{e}. Reinstall reap-lab (`uv sync`) or pass build_artifacts_fn explicitly."
         ) from e
-    return build_artifacts
+
+    def _adapter(
+        spec: SweepSpec, workspace: Workspace, retention: float, calibration_path: Path
+    ) -> list[ArtifactManifest]:
+        with _component_state(spec, workspace) as state:
+            return build_artifacts(spec, retention, calibration_path, workspace, state)
+
+    return _adapter
+
+
+def _load_eval_records(eval_path: str) -> list:
+    """Read+validate the eval set once per path (evaluate runs once per artifact)."""
+    from reaplab.core.jsonl import read_jsonl  # noqa: PLC0415
+    from reaplab.core.records import EvalRecord  # noqa: PLC0415
+
+    cached = _load_eval_records._cache  # type: ignore[attr-defined]
+    if eval_path not in cached:
+        cached.clear()  # one sweep = one eval set; don't grow across specs
+        cached[eval_path] = read_jsonl(eval_path, EvalRecord)
+    return cached[eval_path]
+
+
+_load_eval_records._cache = {}  # type: ignore[attr-defined]
 
 
 def _default_evaluate() -> EvaluateFn:
@@ -90,7 +130,23 @@ def _default_evaluate() -> EvaluateFn:
             "The eval harness (reaplab.evalharness.evaluate_artifact) is unavailable: "
             f"{e}. Reinstall reap-lab (`uv sync`) or pass evaluate_fn explicitly."
         ) from e
-    return evaluate_artifact
+
+    def _adapter(
+        spec: SweepSpec,
+        workspace: Workspace,
+        manifest: ArtifactManifest,
+        eval_path: Path,
+        *,
+        baseline_responses: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        records = _load_eval_records(str(eval_path))
+        with _component_state(spec, workspace) as state:
+            return evaluate_artifact(
+                spec, manifest, records, workspace, state,
+                baseline_responses=baseline_responses,
+            )
+
+    return _adapter
 
 
 def _perf_field(summary: dict[str, Any], context: int, field: str) -> float | None:
@@ -113,7 +169,15 @@ def _perf_field(summary: dict[str, Any], context: int, field: str) -> float | No
 
 
 def _manifest_from_state(state: StateDB, artifact_id: str) -> ArtifactManifest:
-    return ArtifactManifest.model_validate(state.meta("convert", artifact_id)["manifest"])
+    manifest = state.meta("convert", artifact_id)["manifest"]
+    if isinstance(manifest, str):
+        # the prune component records a manifest *path* in its own done-meta; run_sweep
+        # normally overwrites it with the full dict, but tolerate the component form
+        # (e.g. after a crash between the two writes)
+        import json  # noqa: PLC0415
+
+        manifest = json.loads(Path(manifest).read_text(encoding="utf-8"))
+    return ArtifactManifest.model_validate(manifest)
 
 
 def run_sweep(

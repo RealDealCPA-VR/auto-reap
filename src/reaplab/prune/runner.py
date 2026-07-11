@@ -133,7 +133,10 @@ def build_artifacts(
         if mock:
             gguf.write_fake_gguf(bf16_path, seed=f"{spec.model_id}|{rtag}|bf16")
         else:
-            tools = gguf.LlamaCppTools.discover()
+            tools = gguf.LlamaCppTools.discover(
+                convert_script=spec.prune.convert_script,
+                quantize_bin=spec.prune.llama_quantize,
+            )
             gguf.convert_to_gguf(hf_dir, bf16_path, tools, outtype="bf16")
         bf16_s = time.monotonic() - t0
 
@@ -159,7 +162,10 @@ def build_artifacts(
                 gguf.write_fake_gguf(gguf_path, seed=f"{spec.model_id}|{artifact_id}")
             else:
                 if tools is None:
-                    tools = gguf.LlamaCppTools.discover()
+                    tools = gguf.LlamaCppTools.discover(
+                        convert_script=spec.prune.convert_script,
+                        quantize_bin=spec.prune.llama_quantize,
+                    )
                 gguf.quantize(bf16_path, gguf_path, canonical, tools)
             quant_s = time.monotonic() - t0
             manifest = ArtifactManifest(

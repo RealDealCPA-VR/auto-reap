@@ -522,7 +522,7 @@ class MockRunner(ModelRunner):
         if tt == TaskType.JSON_SCHEMA:
             return self._json_answer(record, correct), None
         if tt == TaskType.TOOL_CALL:
-            return self._tool_answer(rng, record, tools, correct)
+            return self._tool_answer(rng, record, tools, correct, self._quality)
         if tt == TaskType.REFUSAL_BENIGN:
             # false-refusal probability grows as quality falls: baseline ~0%,
             # r0.75 ~1.2%, r0.625 ~3%, r0.5 ~7.8% -- exactly the gate signal.
@@ -591,6 +591,7 @@ class MockRunner(ModelRunner):
         record: EvalRecord,
         tools: list[dict[str, Any]] | None,
         correct: bool,
+        quality: float = 0.9,
     ) -> tuple[str, list[dict[str, Any]] | None]:
         defs = tools or record.tools or []
         if not defs:
@@ -612,7 +613,13 @@ class MockRunner(ModelRunner):
             args = synth_args(tool_parameters(tool)) if tool else {}
             return "", call_for(target, args)
         others = [n for n in names if n != target]
-        if others and rng.random() < 0.5:
+        # Schema breakage is a low-retention failure mode: near-baseline artifacts
+        # keep calls schema-valid (they just pick the wrong tool), while aggressive
+        # pruning corrupts calls for real. Wrong answers go invalid with probability
+        # ~0.5% at quality 0.93+ rising steeply below it, so the >=98% validity gate
+        # passes at r0.75/r0.625 and fails at r0.5 (PRD's silent-degradation risk).
+        p_invalid = 0.005 + max(0.0, 0.93 - quality) * 3.0
+        if others and rng.random() >= p_invalid:
             # wrong tool, schema-valid args: validity gate survives, correctness fails
             wrong_name = others[0]
             tool = find_tool(defs, wrong_name)

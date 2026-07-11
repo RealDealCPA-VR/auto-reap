@@ -68,6 +68,12 @@ def _score_item(
             artifact_hash=manifest.artifact_hash or manifest.artifact_id,
         )
         return score, score >= 0.5, "judge", detail
+    if record.task_type == TaskType.OPEN_ENDED and manifest.kind == "baseline":
+        # Pairwise judging scores candidates as win-rate vs. the baseline, where
+        # parity = 0.5. Anchor the baseline's own open-ended score at 0.5 so the
+        # candidate/baseline ratio (quality retention) lives on one scale; without
+        # this a candidate tying the baseline everywhere would still read ~67%.
+        return 0.5, True, "open_ended_anchor", {"anchor": True}
     scorer = get_scorer(record.task_type)
     score, passed, detail = scorer.score(record, response)
     return score, passed, scorer.name, detail

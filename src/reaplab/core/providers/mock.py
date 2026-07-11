@@ -30,12 +30,48 @@ class MockProvider(LLMProvider):
         for needle, reply in responses.items():
             if needle in prompt or (system and needle in system):
                 return LLMResponse(text=reply, prompt_tokens=len(prompt) // 4, completion_tokens=len(reply) // 4)
+        judged = self._judge_pair(prompt)
+        if judged is not None:
+            return LLMResponse(text=judged, prompt_tokens=len(prompt) // 4, completion_tokens=24)
         digest = hashlib.sha256((system or "").encode() + prompt.encode()).hexdigest()[:8]
         if json_mode:
             text = json.dumps({"mock": True, "digest": digest})
         else:
             text = f"[mock:{digest}] deterministic response for testing."
         return LLMResponse(text=text, prompt_tokens=len(prompt) // 4, completion_tokens=16)
+
+    @staticmethod
+    def _judge_pair(prompt: str) -> str | None:
+        """Deterministic pairwise judging so the offline demo's judge discriminates.
+
+        Recognizes the evalharness judge-prompt shape (Response A: / Response B:)
+        and votes for the more substantive answer: refusals and near-empty replies
+        lose, close lengths tie. Returns None for non-judge prompts."""
+        if "Response A:" not in prompt or "Response B:" not in prompt:
+            return None
+        try:
+            _, rest = prompt.split("Response A:", 1)
+            a, rest = rest.split("Response B:", 1)
+            b = rest.split("Which response is better?", 1)[0]
+        except ValueError:
+            return None
+
+        def substance(text: str) -> int:
+            t = text.strip()
+            low = t.lower()
+            refusal_markers = ("i can't", "i cannot", "i'm not able", "i won't", "unable to help")
+            if not t or any(low.startswith(m) or m in low[:80] for m in refusal_markers):
+                return 0
+            return len(t)
+
+        sa, sb = substance(a), substance(b)
+        if sa == 0 and sb == 0:
+            winner = "tie"
+        elif min(sa, sb) > 0 and abs(sa - sb) <= max(sa, sb) * 0.25:
+            winner = "tie"
+        else:
+            winner = "A" if sa > sb else "B"
+        return json.dumps({"winner": winner, "reason": "mock heuristic: substance comparison"})
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         return [self._vec(t) for t in texts]

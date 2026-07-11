@@ -75,7 +75,10 @@ def build_baseline(spec: SweepSpec, workspace: Workspace, state: StateDB) -> lis
                 gguf.write_fake_gguf(gguf_path, seed=f"{spec.model_id}|{artifact_id}")
             else:
                 if tools is None:
-                    tools = gguf.LlamaCppTools.discover()
+                    tools = gguf.LlamaCppTools.discover(
+                        convert_script=spec.prune.convert_script,
+                        quantize_bin=spec.prune.llama_quantize,
+                    )
                 if not bf16_path.exists():
                     if hf_dir is None:
                         # raises PrerequisiteError with `hf download` guidance

@@ -126,6 +126,10 @@ class PruneCfg(BaseModel):
     dtype: str = "bfloat16"
     device_map: str = "auto"
     remote: RemoteCfg = Field(default_factory=RemoteCfg)
+    # llama.cpp tooling pins; when None, discovery falls back to env vars
+    # (CONVERT_HF_TO_GGUF, LLAMA_QUANTIZE, LLAMA_CPP_DIR), PATH, then common dirs.
+    convert_script: str | None = None  # path to llama.cpp's convert_hf_to_gguf.py
+    llama_quantize: str | None = None  # path to the llama-quantize binary
 
 
 class RuntimeCfg(BaseModel):

@@ -126,13 +126,15 @@ def test_two_artifacts_share_results_file(env, make_manifest):
     assert {r.artifact_id for r in results} == {"baseline-q4_k_m", "r0.5-q4_k_m"}
 
 
-def test_baseline_open_ended_uses_heuristic_candidate_uses_judge(env, make_manifest):
+def test_baseline_open_ended_anchored_candidate_uses_judge(env, make_manifest):
     spec, ws, state, records = env
     base_summary = evaluate_artifact(spec, make_manifest(), records, ws, state)
     results = read_jsonl(ws.results_jsonl(spec.config_hash()), ItemResult)
     base_oe = [r for r in results if r.task_type == TaskType.OPEN_ENDED]
-    assert base_oe and all(r.scorer == "open_ended_heuristic" for r in base_oe)
-    assert all(r.detail.get("unjudged") for r in base_oe)
+    # the baseline is the judging reference: its open-ended score is anchored at
+    # 0.5 (win-rate vs itself) so candidate/baseline ratios share one scale
+    assert base_oe and all(r.scorer == "open_ended_anchor" for r in base_oe)
+    assert all(r.score == 0.5 and r.detail.get("anchor") for r in base_oe)
 
     cand = make_manifest(artifact_id="r0.75-q4_k_m", kind="gguf", retention=0.75)
     evaluate_artifact(spec, cand, records, ws, state, baseline_responses=base_summary["responses"])
