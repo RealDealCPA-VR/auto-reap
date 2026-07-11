@@ -1,0 +1,134 @@
+# Example domain pack: a CPA firm's local-model workload (the PRD's original use case).
+# Weights approximate the runtime mix; the generator produces items proportionally.
+# Author your own pack for your workload — or let `reap-lab init` draft one for you.
+
+name: cpa-firm
+description: >
+  Accounting/tax practice assistant: bookkeeping categorization, financial-statement
+  extraction, tax research, client correspondence, IRS notice triage, and agentic
+  tool-calling through an MCP dispatcher.
+include_refusal_suites: true
+
+domains:
+  - name: qbo_categorization
+    description: Categorize bank-feed and QuickBooks Online transactions into a chart of accounts.
+    task_type: exact
+    weight: 3.0
+    prompt_guidance: >
+      Realistic bank-feed lines (vendor, amount, memo) with a provided chart of accounts.
+      Include ambiguous vendors, split transactions, transfers vs. expenses, personal vs.
+      business, and malformed/truncated descriptors as edge cases. Gold = the account name.
+    tags: [bank_feed, bookkeeping]
+
+  - name: fs_extraction
+    description: Extract structured JSON from financial statements and trial balances.
+    task_type: json_schema
+    weight: 2.0
+    long_context: true
+    prompt_guidance: >
+      Markdown/plaintext financial statements (balance sheet, P&L, trial balance), some
+      malformed or partially OCR-garbled. Extract totals, line items, and periods into the
+      schema. Include statements long enough to exercise 16k+ contexts.
+    json_schema:
+      type: object
+      required: [entity, period, lines]
+      properties:
+        entity: { type: string }
+        period: { type: string }
+        lines:
+          type: array
+          items:
+            type: object
+            required: [account, amount]
+            properties:
+              account: { type: string }
+              amount: { type: number }
+
+  - name: tax_research
+    description: Federal/state tax research Q&A with citations to authority.
+    task_type: open_ended
+    weight: 2.0
+    prompt_guidance: >
+      Entity elections, basis, depreciation, credits, multi-state apportionment. Rubrics
+      should reward correct authority (IRC/regs/pubs), correct conclusions, and flagged
+      uncertainty; penalize invented citations.
+
+  - name: client_email
+    description: Draft client-facing correspondence in a professional, warm firm voice.
+    task_type: open_ended
+    weight: 1.5
+    prompt_guidance: >
+      Deadline reminders, document requests, fee discussions, delivering bad news
+      (balance due, notice received). Rubrics reward tone, brevity, and next-step clarity.
+
+  - name: irs_notice_triage
+    description: Classify IRS/state notices and propose the response plan.
+    task_type: open_ended
+    weight: 1.5
+    long_context: true
+    prompt_guidance: >
+      CP2000, CP14, 566 audits, state matching notices — some as long OCR'd text. Rubric
+      rewards correct notice identification, deadline extraction, and a sane action plan.
+    tags: [cp2000, notices]
+
+  - name: monthly_close_agent
+    description: Multi-step agentic reasoning for a monthly close checklist.
+    task_type: tool_call
+    weight: 1.0
+    prompt_guidance: >
+      The model must pick the right tool and arguments for close steps: fetch statements,
+      reconcile, post adjustments, produce reports. One correct tool call per item.
+    tools: &accounting_tools
+      - type: function
+        function:
+          name: fetch_statement
+          description: Fetch a bank or credit-card statement for a period.
+          parameters:
+            type: object
+            required: [account_id, period]
+            properties:
+              account_id: { type: string }
+              period: { type: string, description: "YYYY-MM" }
+      - type: function
+        function:
+          name: reconcile_account
+          description: Run reconciliation for an account and period.
+          parameters:
+            type: object
+            required: [account_id, period]
+            properties:
+              account_id: { type: string }
+              period: { type: string }
+      - type: function
+        function:
+          name: post_journal_entry
+          description: Post an adjusting journal entry.
+          parameters:
+            type: object
+            required: [memo, lines]
+            properties:
+              memo: { type: string }
+              lines:
+                type: array
+                items:
+                  type: object
+                  required: [account, debit, credit]
+                  properties:
+                    account: { type: string }
+                    debit: { type: number }
+                    credit: { type: number }
+
+  - name: mcp_tool_planning
+    description: Plan MCP tool-call sequences for dispatcher tasks.
+    task_type: tool_call
+    weight: 1.0
+    prompt_guidance: >
+      Realistic dispatcher requests (pull a report, file a document, schedule a task)
+      where the model must emit a schema-valid first tool call.
+    tools: *accounting_tools
+
+  - name: general_chat
+    description: General utility chat — summaries, rewrites, quick questions.
+    task_type: open_ended
+    weight: 1.0
+    prompt_guidance: Everyday assistant tasks unrelated to accounting, for distribution balance.

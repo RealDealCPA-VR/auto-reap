@@ -1,0 +1,52 @@
+# reap-lab sweep spec — the one file that drives the whole pipeline.
+# Run: reap-lab sweep configs/example-sweep.yaml
+# Paths resolve relative to this file. Full reference: docs/DOMAIN_PACKS.md + `reap-lab sweep --help`.
+
+model_id: Qwen/Qwen3-30B-A3B
+domain_pack: domain-packs/cpa-firm.yaml
+
+# Expert retention fractions to sweep (keep 75% / 62.5% / 50% of experts per layer)
+retention: [0.75, 0.625, 0.50]
+quants: [Q4_K_M, Q5_K_M]
+seeds: [42]
+include_baseline: true
+
+generator:
+  kind: claude-cli        # subscription-based, zero API key; or openai-compat / anthropic-api / mock
+
+judge:
+  provider:
+    kind: claude-cli
+  votes: 3
+  version: j1
+
+data:
+  calibration_size: 1000
+  eval_size: 300
+  near_dup_threshold: 0.90
+  dedup_backend: fuzzy    # "embedding" + embedding_provider for cosine dedup via LM Studio
+
+prune:
+  execution_profile: remote   # mock | local-offload | remote
+  remote:
+    provider: runpod
+    budget_usd: 75
+    usd_per_hour: 2.5
+
+runtime:
+  kind: llama-server      # or openai-compat with base_url of an already-running server
+  contexts: [4096, 32768]
+
+gates:
+  min_quality_retention: 0.95
+  max_domain_regression_pts: 5
+  max_vram_gb: 40
+  max_false_refusal_rate: 0.02
+  min_tool_call_validity: 0.98
+
+promote:
+  publisher: reap-lab
+  # lmstudio_dir: auto-detected; smoke_command / decision_dir optional
+
+workspace: workspace
+min_free_disk_gb: 80
