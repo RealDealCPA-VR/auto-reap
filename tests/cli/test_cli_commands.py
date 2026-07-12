@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import yaml
 from typer.testing import CliRunner
 
@@ -111,6 +114,8 @@ def _mini_spec(tmp_path, **overrides) -> str:
         "data": {"calibration_size": 30, "eval_size": 30},
         "prune": {"execution_profile": "mock"},
         "runtime": {"kind": "mock"},
+        # sandboxed LM Studio dir: `promote` must never touch the real ~/.lmstudio
+        "promote": {"lmstudio_dir": str(tmp_path / "lms-models")},
         "workspace": str(tmp_path / "ws"),
         "min_free_disk_gb": 0.5,
     }
@@ -120,11 +125,28 @@ def _mini_spec(tmp_path, **overrides) -> str:
     return str(spec_path)
 
 
+def _load(spec_path: str):
+    from reaplab.core.config import SweepSpec
+
+    return SweepSpec.from_yaml(Path(spec_path))
+
+
+def _data_dir(spec_path: str) -> Path:
+    from reaplab.core.paths import Workspace
+
+    spec = _load(spec_path)
+    return Workspace(spec.workspace).data_dir(spec.config_hash())
+
+
 def test_generate_then_audit(tmp_path):
     spec_path = _mini_spec(tmp_path)
     gen = runner.invoke(app, ["generate", spec_path])
     assert gen.exit_code == 0, gen.output
     assert "calibration" in gen.output
+    # datasets are per-sweep: they live under runs/<config_hash>/data (C1)
+    data_dir = _data_dir(spec_path)
+    assert (data_dir / "eval_v1.jsonl").exists()
+    assert (data_dir / "calibration_v1.jsonl").exists()
     audit = runner.invoke(app, ["audit", spec_path])
     assert audit.exit_code == 0, audit.output
 
@@ -134,6 +156,48 @@ def test_audit_before_generate_instructs(tmp_path):
     result = runner.invoke(app, ["audit", spec_path])
     assert result.exit_code == 1
     assert "generate" in result.output
+
+
+def _sentinel_eval_set(spec_path: str) -> None:
+    """Replace the generated eval set with one recognizable item, so any command that
+    silently REGENERATES datasets is caught red-handed ([15]/[28])."""
+    item = {
+        "id": "sentinel-1",
+        "domain": "classify",
+        "prompt": "Which category?",
+        "task_type": "exact",
+        "gold": "billing",
+    }
+    (_data_dir(spec_path) / "eval_v1.jsonl").write_text(
+        json.dumps(item) + "\n", encoding="utf-8"
+    )
+
+
+def test_eval_reuses_the_audited_dataset(tmp_path):
+    spec_path = _mini_spec(tmp_path)
+    assert runner.invoke(app, ["generate", spec_path]).exit_code == 0
+    _sentinel_eval_set(spec_path)
+
+    gguf = tmp_path / "candidate-Q4_K_M.gguf"
+    gguf.write_bytes(b"GGUF" + b"\x00" * 64)
+    result = runner.invoke(app, ["eval", spec_path, "--gguf", str(gguf)])
+    assert result.exit_code == 0, result.output
+    flat = " ".join(result.output.split())  # rich wraps the table title
+    assert "(1 items)" in flat, "eval regenerated the dataset instead of reusing it"
+    assert (_data_dir(spec_path) / "eval_v1.jsonl").read_text(
+        encoding="utf-8"
+    ).count("\n") == 1
+
+
+def test_prune_reuses_the_audited_dataset(tmp_path):
+    spec_path = _mini_spec(tmp_path)
+    assert runner.invoke(app, ["generate", spec_path]).exit_code == 0
+    _sentinel_eval_set(spec_path)
+
+    prune = runner.invoke(app, ["prune", spec_path, "--retention", "0.75"])
+    assert prune.exit_code == 0, prune.output
+    kept = (_data_dir(spec_path) / "eval_v1.jsonl").read_text(encoding="utf-8")
+    assert "sentinel-1" in kept, "prune regenerated (and overwrote) the audited eval set"
 
 
 def test_sweep_report_status_flow(tmp_path):
@@ -147,6 +211,59 @@ def test_sweep_report_status_flow(tmp_path):
 
     status = runner.invoke(app, ["status", spec_path])
     assert status.exit_code == 0, status.output
+
+
+def test_report_runs_no_new_work(tmp_path, monkeypatch):
+    """[34]/[m3]: `report` promises 'no new work' — it must not resume the sweep."""
+    spec_path = _mini_spec(tmp_path)
+    assert runner.invoke(app, ["sweep", spec_path]).exit_code == 0
+
+    import reaplab.orchestrate as orch
+
+    def boom(*args, **kwargs):
+        raise AssertionError("report must not run the sweep")
+
+    monkeypatch.setattr(orch, "run_sweep", boom)
+    result = runner.invoke(app, ["report", spec_path])
+    assert result.exit_code == 0, result.output
+    assert "Report:" in result.output
+
+
+def test_report_before_any_sweep_is_instructive(tmp_path):
+    spec_path = _mini_spec(tmp_path)
+    result = runner.invoke(app, ["report", spec_path])
+    assert result.exit_code == 1
+    assert "Nothing has been evaluated yet" in result.output
+    assert "reap-lab sweep" in result.output
+
+
+def test_promote_places_the_winner_and_accepts_an_artifact_override(tmp_path):
+    spec_path = _mini_spec(tmp_path)
+    assert runner.invoke(app, ["sweep", spec_path]).exit_code == 0
+
+    result = runner.invoke(app, ["promote", spec_path])
+    assert result.exit_code == 0, result.output
+    promoted = list((tmp_path / "lms-models").rglob("*.gguf"))
+    assert len(promoted) == 1
+    assert "r0.75-q4_k_m" in promoted[0].name
+
+    override = runner.invoke(app, ["promote", spec_path, "--artifact", "r0.75-q4_k_m"])
+    assert override.exit_code == 0, override.output
+
+
+def test_promote_unknown_artifact_exits_one(tmp_path):
+    spec_path = _mini_spec(tmp_path)
+    assert runner.invoke(app, ["sweep", spec_path]).exit_code == 0
+    result = runner.invoke(app, ["promote", spec_path, "--artifact", "nope-q4_k_m"])
+    assert result.exit_code == 1
+    assert "nope-q4_k_m" in result.output
+
+
+def test_promote_before_any_sweep_exits_one(tmp_path):
+    spec_path = _mini_spec(tmp_path)
+    result = runner.invoke(app, ["promote", spec_path])
+    assert result.exit_code == 1
+    assert "reap-lab sweep" in result.output
 
 
 def test_prune_and_convert_commands(tmp_path):

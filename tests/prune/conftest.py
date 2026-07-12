@@ -64,6 +64,15 @@ def no_llama_tools(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.fixture
+def allow_local_offload(monkeypatch: pytest.MonkeyPatch) -> None:
+    """local-offload refuses to run on Windows (reap pins vllm). Tests that exercise the
+    profile's command sequence opt out of that guard explicitly."""
+    from reaplab.prune.profiles import ALLOW_LOCAL_OFFLOAD_ENV
+
+    monkeypatch.setenv(ALLOW_LOCAL_OFFLOAD_ENV, "1")
+
+
+@pytest.fixture
 def empty_hf_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     """Point the HF cache at an empty tmp dir so no local model resolves."""
     cache = tmp_path / "hf-cache" / "hub"

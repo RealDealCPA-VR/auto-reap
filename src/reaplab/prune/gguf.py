@@ -107,6 +107,20 @@ def _common_dirs() -> list[Path]:
     return dirs
 
 
+def _in_cwd(hit: str | Path) -> bool:
+    """True when a discovered binary sits in the current working directory.
+
+    On Windows (and on Python's `shutil.which`, which prepends "." on nt),
+    a file named ``llama-quantize.exe`` dropped into the folder you happen to be
+    standing in would otherwise be executed. Discovery must be explicit, never
+    ambient: we ignore such hits unless the user configured the path themselves.
+    """
+    try:
+        return Path(hit).resolve().parent == Path.cwd().resolve()
+    except OSError:  # pragma: no cover - unresolvable path: treat as not-in-cwd
+        return False
+
+
 def _resolve_tool(
     explicit: str | Path | None,
     *,
@@ -114,7 +128,7 @@ def _resolve_tool(
     names: list[str],
     kind: str,
 ) -> Path:
-    """Discovery order: explicit path -> env var -> PATH -> common Windows dirs."""
+    """Discovery order: explicit path -> env var -> PATH (never the CWD) -> common dirs."""
     if explicit is not None:
         p = Path(explicit)
         if p.exists():
@@ -132,16 +146,31 @@ def _resolve_tool(
             f"{env_var} points at a missing file: {p}\nFix or unset the environment variable.\n"
             + _INSTALL_HINT
         )
+    ignored_cwd: list[str] = []
     for name in names:
         hit = shutil.which(name)
-        if hit:
-            return Path(hit)
+        if not hit:
+            continue
+        if _in_cwd(hit):
+            # a binary in the CWD is never trusted implicitly (see _in_cwd)
+            ignored_cwd.append(str(hit))
+            continue
+        return Path(hit)
     for d in _common_dirs():
         for name in names:
             candidate = d / name
             if candidate.exists():
                 return candidate
-    raise ToolNotFoundError(f"Could not find {kind} ({' / '.join(names)}).\n" + _INSTALL_HINT)
+    cwd_note = ""
+    if ignored_cwd:
+        cwd_note = (
+            f"\nIgnored a match in the current directory ({', '.join(ignored_cwd)}): reap-lab never "
+            f"runs binaries found in the CWD implicitly. If that file really is the {kind}, point at "
+            f"it explicitly via {env_var} or the sweep YAML (prune.convert_script / prune.llama_quantize)."
+        )
+    raise ToolNotFoundError(
+        f"Could not find {kind} ({' / '.join(names)}).{cwd_note}\n" + _INSTALL_HINT
+    )
 
 
 @dataclass(frozen=True)

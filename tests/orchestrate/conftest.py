@@ -13,6 +13,7 @@ import pytest
 from reaplab.core.config import DomainPack, DomainSpec, Gates, SweepSpec
 from reaplab.core.paths import Workspace
 from reaplab.core.records import ArtifactManifest, PerfMetrics, TaskType
+from reaplab.core.state import StateDB
 
 PACK_YAML = """\
 name: test-pack
@@ -114,14 +115,26 @@ def ws(tmp_path: Path) -> Workspace:
 
 
 class SweepHarness:
-    """Injectable fake pipeline: counts calls, records baseline_responses
-    forwarding, and can be told to fail specific retentions."""
+    """Injectable fake pipeline that honors the REAL component contracts.
+
+    Like the live components it writes its own StateDB rows — ("prune", r<x>) and
+    ("convert", <artifact_id>) with a manifest PATH in the done-meta, ("prune",
+    r<x>) marked 'manual' before raising NeedsManualStep — because run_sweep no
+    longer writes those rows itself. Counts calls, records the baseline_responses
+    and resume flags it was handed, and can be told to fail or stall specific
+    retentions.
+    """
 
     def __init__(self, tmp_path: Path):
         self.tmp_path = tmp_path
         self.counts: Counter[str] = Counter()
         self.baseline_responses_seen: list[dict[str, str] | None] = []
+        self.resume_seen: list[bool] = []
         self.fail_retentions: set[float] = set()
+        self.manual_retentions: set[float] = set()
+        #: quants the baseline builder produces; None = every quant in the spec
+        #: (a user-supplied baseline_gguf covers ONE quant, so this can be narrower)
+        self.baseline_quants: list[str] | None = None
 
         pack_path = tmp_path / "pack.yaml"
         pack_path.write_text(PACK_YAML, encoding="utf-8")
@@ -134,13 +147,33 @@ class SweepHarness:
             min_free_disk_gb=0.0,
         )
 
+    # -- component-side state bookkeeping ----------------------------------
+
+    def _state(self, workspace: Workspace) -> StateDB:
+        return StateDB(workspace.state_db(self.spec.config_hash()))
+
+    def _record_convert(
+        self, workspace: Workspace, manifest: ArtifactManifest, state: StateDB
+    ) -> None:
+        man_dir = workspace.run_dir(manifest.config_hash) / "manifests"
+        man_dir.mkdir(parents=True, exist_ok=True)
+        man_path = man_dir / f"{manifest.artifact_id}.json"
+        man_path.write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
+        state.mark_done(
+            "convert",
+            manifest.artifact_id,
+            meta={"path": manifest.path, "manifest": str(man_path)},
+        )
+
     # -- injected stage callables ------------------------------------------
 
     def datagen(self, spec: SweepSpec, workspace: Workspace) -> tuple[Path, Path]:
         self.counts["datagen"] += 1
-        cal = workspace.data / "calibration_v1.jsonl"
+        data_dir = workspace.data_dir(spec.config_hash())  # per-sweep datasets (C1)
+        data_dir.mkdir(parents=True, exist_ok=True)
+        cal = data_dir / "calibration_v1.jsonl"
         cal.write_text('{"id": "cal-1"}\n', encoding="utf-8")
-        ev = workspace.data / "eval_v1.jsonl"
+        ev = data_dir / "eval_v1.jsonl"
         ev.write_text('{"id": "ev-1"}\n', encoding="utf-8")
         return cal, ev
 
@@ -148,11 +181,13 @@ class SweepHarness:
         self, spec: SweepSpec, workspace: Workspace, artifact_id: str,
         retention: float | None, quant: str,
     ) -> ArtifactManifest:
-        path = workspace.artifacts / f"{artifact_id}.gguf"
+        art_dir = workspace.artifacts / spec.config_hash()
+        art_dir.mkdir(parents=True, exist_ok=True)
+        path = art_dir / f"{artifact_id}.gguf"
         path.write_bytes(b"GGUF" + artifact_id.encode("utf-8") * 8)
         return ArtifactManifest(
             artifact_id=artifact_id,
-            kind="gguf",
+            kind="baseline" if retention is None else "gguf",
             model_id=spec.model_id,
             retention=retention,
             quant=quant,
@@ -163,23 +198,41 @@ class SweepHarness:
 
     def build_baseline(self, spec: SweepSpec, workspace: Workspace) -> list[ArtifactManifest]:
         self.counts["build_baseline"] += 1
-        return [
+        manifests = [
             self._manifest(spec, workspace, f"baseline-{q.lower()}", None, q)
-            for q in spec.quants
+            for q in (self.baseline_quants or spec.quants)
         ]
+        with self._state(workspace) as state:
+            for m in manifests:
+                self._record_convert(workspace, m, state)
+        return manifests
 
     def build_artifacts(
         self, spec: SweepSpec, workspace: Workspace, retention: float, calibration_path: Path
     ) -> list[ArtifactManifest]:
         self.counts["build_artifacts"] += 1
-        if retention in self.fail_retentions:
-            raise RuntimeError(f"synthetic prune failure at r{retention:g}")
-        return [
-            self._manifest(
-                spec, workspace, f"r{retention:g}-{q.lower()}", retention, q
-            )
-            for q in spec.quants
-        ]
+        rkey = f"r{retention:g}"
+        with self._state(workspace) as state:
+            if retention in self.manual_retentions:
+                from reaplab.prune import NeedsManualStep
+
+                instructions = (
+                    f"Run the generated prune script for {rkey} on your GPU box:\n"
+                    f"  bash prune_remote_{rkey}.sh"
+                )
+                state.mark_manual("prune", rkey, instructions)
+                raise NeedsManualStep(instructions)
+            if retention in self.fail_retentions:
+                state.mark_failed("prune", rkey, f"synthetic prune failure at {rkey}")
+                raise RuntimeError(f"synthetic prune failure at {rkey}")
+            manifests = [
+                self._manifest(spec, workspace, f"{rkey}-{q.lower()}", retention, q)
+                for q in spec.quants
+            ]
+            state.mark_done("prune", rkey)
+            for m in manifests:
+                self._record_convert(workspace, m, state)
+        return manifests
 
     def evaluate(
         self,
@@ -189,8 +242,10 @@ class SweepHarness:
         eval_path: Path,
         *,
         baseline_responses: dict[str, str] | None = None,
+        resume: bool = True,
     ) -> dict[str, Any]:
         self.counts["evaluate"] += 1
+        self.resume_seen.append(resume)
         if manifest.retention is None:  # baseline
             return make_summary(
                 manifest.artifact_id,
@@ -211,14 +266,14 @@ class SweepHarness:
     def run(self, **kwargs: Any) -> Path:
         from reaplab.orchestrate import run_sweep
 
-        return run_sweep(
-            self.spec,
-            datagen_fn=self.datagen,
-            build_baseline_fn=self.build_baseline,
-            build_artifacts_fn=self.build_artifacts,
-            evaluate_fn=self.evaluate,
-            **kwargs,
-        )
+        stages: dict[str, Any] = {
+            "datagen_fn": self.datagen,
+            "build_baseline_fn": self.build_baseline,
+            "build_artifacts_fn": self.build_artifacts,
+            "evaluate_fn": self.evaluate,
+        }
+        stages.update(kwargs)  # callers may override any stage (or pass resume/promote)
+        return run_sweep(self.spec, **stages)
 
 
 @pytest.fixture

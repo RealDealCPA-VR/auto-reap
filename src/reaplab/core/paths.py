@@ -42,6 +42,12 @@ class Workspace:
     def run_dir(self, config_hash: str) -> Path:
         return self.root / "runs" / config_hash
 
+    def data_dir(self, config_hash: str) -> Path:
+        """Per-sweep dataset directory. Datasets are keyed by config hash so two specs
+        sharing one workspace can never overwrite each other's calibration/eval sets
+        (and a resumed sweep always reads exactly the data it started with)."""
+        return self.run_dir(config_hash) / "data"
+
     def state_db(self, config_hash: str) -> Path:
         return self.run_dir(config_hash) / "state.db"
 
@@ -56,12 +62,23 @@ class Workspace:
             d.mkdir(parents=True, exist_ok=True)
         if config_hash:
             self.run_dir(config_hash).mkdir(parents=True, exist_ok=True)
+            self.data_dir(config_hash).mkdir(parents=True, exist_ok=True)
             self.logs(config_hash).mkdir(parents=True, exist_ok=True)
         return self
 
 
 def free_disk_gb(path: str | Path = ".") -> float:
-    """Free space on the volume holding `path` (sweep guard, PRD FR-4.2)."""
+    """Free space on the volume that actually holds `path` (sweep guard, PRD FR-4.2).
+
+    Measures the deepest existing ancestor of `path`, not the drive anchor — on
+    systems where the workspace sits on a mounted volume, the anchor would report
+    the wrong disk."""
     import shutil
 
-    return shutil.disk_usage(Path(path).resolve().anchor or ".").free / 1e9
+    p = Path(path).resolve()
+    while not p.exists():
+        parent = p.parent
+        if parent == p:
+            break
+        p = parent
+    return shutil.disk_usage(p).free / 1e9

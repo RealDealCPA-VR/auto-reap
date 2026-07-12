@@ -63,8 +63,10 @@ def extract_json(text: str) -> Any:
         return json.loads(s)
     except json.JSONDecodeError:
         pass
-    # fall back to the first balanced JSON object/array in the text
-    for opener, closer in (("{", "}"), ("[", "]")):
+    # fall back to the FIRST balanced JSON value in the text — try the opener that
+    # appears earliest so "...prose... [{...}]" yields the array, not the inner object
+    candidates = [(s.find(o), o, c) for o, c in (("{", "}"), ("[", "]")) if s.find(o) != -1]
+    for _, opener, closer in sorted(candidates):
         start = s.find(opener)
         if start == -1:
             continue

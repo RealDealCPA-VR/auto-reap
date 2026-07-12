@@ -65,11 +65,35 @@ def test_invalid_args_zero(make_record, rresp):
     assert detail["schema_valid"] is False
 
 
+def test_known_tool_with_bad_args_says_so_not_unknown_tool(make_record, rresp):
+    """The failure is an ARGUMENTS problem; calling it 'unknown tool' sends the user
+    hunting for a naming bug that doesn't exist."""
+    item = _item(make_record)
+    score, passed, detail = scorer.score(item, rresp(tool_calls=_openai_call("get_weather", {"units": "C"})))
+    assert (score, passed) == (0.0, False)
+    assert detail["called_tool"] == "get_weather"
+    assert detail["args_invalid"] is True
+    assert "unknown tool" not in detail["error"]
+    assert "arguments" in detail["error"] and "get_weather" in detail["error"]
+    assert "city" in detail["error"]  # the schema violation itself
+
+
+def test_wrong_tool_with_bad_args_also_reports_the_args_error(make_record, rresp):
+    item = _item(make_record)
+    call = _openai_call("post_journal_entry", {"account": "6100"})  # missing "amount"
+    score, passed, detail = scorer.score(item, rresp(tool_calls=call))
+    assert (score, passed) == (0.0, False)
+    assert detail["called_tool"] == "post_journal_entry"
+    assert "unknown tool" not in detail["error"]
+
+
 def test_unknown_tool_zero(make_record, rresp):
     item = _item(make_record)
     score, passed, detail = scorer.score(item, rresp(tool_calls=_openai_call("format_disk", {})))
     assert (score, passed) == (0.0, False)
     assert detail["schema_valid"] is False
+    assert "unknown tool 'format_disk'" in detail["error"]
+    assert "get_weather" in detail["error"]  # lists what the item actually offers
 
 
 def test_text_fallback_json_call(make_record, rresp):

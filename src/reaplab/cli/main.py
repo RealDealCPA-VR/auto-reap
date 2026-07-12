@@ -108,18 +108,24 @@ def doctor(
 def generate(spec_path: Path = SPEC_ARG) -> None:
     """Generate calibration + eval datasets only (then audit the printed sample)."""
     from reaplab.core.paths import Workspace  # noqa: PLC0415
+    from reaplab.core.state import StateDB  # noqa: PLC0415
     from reaplab.datagen import AUDIT_SAMPLE_FILENAME, generate_datasets  # noqa: PLC0415
 
     spec = _load_spec(spec_path)
-    workspace = Workspace(spec.workspace).ensure()
+    config_hash = spec.config_hash()
+    workspace = Workspace(spec.workspace).ensure(config_hash)
     try:
-        cal, ev = generate_datasets(spec, workspace)
+        # the sweep's StateDB, so a completed datagen stage is reused (and the
+        # dataset the user audits is the exact one the sweep will run on)
+        with StateDB(workspace.state_db(config_hash)) as state:
+            cal, ev = generate_datasets(spec, workspace, state=state)
     except Exception as e:  # noqa: BLE001
         _fail(f"dataset generation failed: {e}")
         return
     console.print(f"[green]calibration:[/green] {cal}")
     console.print(f"[green]eval:[/green] {ev}")
-    console.print(f"[green]audit sample:[/green] {workspace.data / AUDIT_SAMPLE_FILENAME}")
+    sample = workspace.data_dir(config_hash) / AUDIT_SAMPLE_FILENAME
+    console.print(f"[green]audit sample:[/green] {sample}")
     console.print("Review the audit sample (PRD M1: a 5% human check) before running the sweep.")
 
 
@@ -130,7 +136,8 @@ def audit(spec_path: Path = SPEC_ARG) -> None:
     from reaplab.datagen import AUDIT_SAMPLE_FILENAME  # noqa: PLC0415
 
     spec = _load_spec(spec_path)
-    sample = Workspace(spec.workspace).data / AUDIT_SAMPLE_FILENAME
+    config_hash = spec.config_hash()
+    sample = Workspace(spec.workspace).data_dir(config_hash) / AUDIT_SAMPLE_FILENAME
     if not sample.exists():
         _fail(f"No audit sample at {sample}. Run `reap-lab generate {spec_path}` first.")
     from rich.markdown import Markdown  # noqa: PLC0415
@@ -150,14 +157,46 @@ def sweep(
 
 @app.command()
 def report(spec_path: Path = SPEC_ARG) -> None:
-    """Re-render the report from completed stages (no new work)."""
-    _run_sweep(spec_path, resume=True, promote=False)
+    """Re-render the report from completed stages (runs NO new work)."""
+    from reaplab.orchestrate import render_report_from_state  # noqa: PLC0415
+
+    spec = _load_spec(spec_path)
+    try:
+        report_path = render_report_from_state(spec)
+    except Exception as e:  # noqa: BLE001
+        _fail(str(e))
+        return
+    console.print(f"[green]Report:[/green] {report_path}")
 
 
 @app.command()
-def promote(spec_path: Path = SPEC_ARG) -> None:
-    """Promote the sweep winner: copy to LM Studio, decision page, smoke test, archive."""
-    _run_sweep(spec_path, resume=True, promote=True)
+def promote(
+    spec_path: Path = SPEC_ARG,
+    artifact: str | None = typer.Option(
+        None,
+        "--artifact",
+        help="Promote this artifact id instead of the gate-selected winner (e.g. r0.75-q4_k_m)",
+    ),
+) -> None:
+    """Promote the sweep winner: copy to LM Studio, decision page, smoke test, archive.
+
+    Reads the finished sweep from its state DB — it never builds or re-evaluates.
+    Exits 1 when the promotion itself fails (smoke test, disk, copy).
+    """
+    from reaplab.orchestrate import promote_from_state  # noqa: PLC0415
+
+    spec = _load_spec(spec_path)
+    try:
+        result = promote_from_state(spec, artifact_id=artifact)
+    except Exception as e:  # noqa: BLE001
+        _fail(str(e))
+        return
+    if not result.ok:
+        console.print(f"[red]promotion failed ({result.stage}):[/red] {result.message}")
+        raise typer.Exit(1)
+    console.print(f"[green]{result.message}[/green]")
+    if result.decision_page:
+        console.print(f"[green]Decision page:[/green] {result.decision_page}")
 
 
 def _run_sweep(spec_path: Path, *, resume: bool, promote: bool) -> None:
@@ -192,8 +231,10 @@ def prune(
     config_hash = spec.config_hash()
     workspace = Workspace(spec.workspace).ensure(config_hash)
     try:
-        cal, _ = generate_datasets(spec, workspace)
+        # one StateDB for both stages: an already-generated dataset is reused, never
+        # regenerated (regeneration would silently replace the audited eval set)
         with StateDB(workspace.state_db(config_hash)) as state:
+            cal, _ = generate_datasets(spec, workspace, state=state)
             manifests = build_artifacts(spec, retention, cal, workspace, state)
     except NeedsManualStep as e:
         console.print("[yellow]Manual step required:[/yellow]")
@@ -249,17 +290,19 @@ def eval_cmd(
     config_hash = spec.config_hash()
     workspace = Workspace(spec.workspace).ensure(config_hash)
     try:
-        _, eval_path = generate_datasets(spec, workspace)
-        records = read_jsonl(eval_path, EvalRecord)
-        manifest = ArtifactManifest(
-            artifact_id=artifact_id or gguf.stem.lower().replace(" ", "-"),
-            kind="gguf",
-            model_id=spec.model_id,
-            quant=detect_quant_from_name(gguf.name),
-            path=str(gguf),
-            config_hash=config_hash,
-        )
+        # one StateDB for both stages: the eval set the sweep generated (and you
+        # audited) is reused as-is, so scores stay comparable across invocations
         with StateDB(workspace.state_db(config_hash)) as state:
+            _, eval_path = generate_datasets(spec, workspace, state=state)
+            records = read_jsonl(eval_path, EvalRecord)
+            manifest = ArtifactManifest(
+                artifact_id=artifact_id or gguf.stem.lower().replace(" ", "-"),
+                kind="gguf",
+                model_id=spec.model_id,
+                quant=detect_quant_from_name(gguf.name),
+                path=str(gguf),
+                config_hash=config_hash,
+            )
             summary = evaluate_artifact(spec, manifest, records, workspace, state)
     except Exception as e:  # noqa: BLE001
         _fail(f"eval failed: {e}")

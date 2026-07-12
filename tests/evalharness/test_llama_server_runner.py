@@ -46,7 +46,25 @@ def _cfg(**kw) -> RuntimeCfg:
 
 
 def _healthy_get(url, timeout=None):
+    """Answers 200 immediately — i.e. SOMETHING is already on the port."""
     return SimpleNamespace(status_code=200)
+
+
+def _get_healthy_after(n: int):
+    """Dead until the nth probe: the port is free at start(), then the server comes up.
+
+    start() probes the port before spawning (a live port means a foreign server), so a
+    test that wants a successful launch must not answer 200 on the first probe.
+    """
+    calls = {"n": 0}
+
+    def _get(url, timeout=None):
+        calls["n"] += 1
+        if calls["n"] <= n:
+            raise httpx.ConnectError("nothing listening")
+        return SimpleNamespace(status_code=200)
+
+    return _get
 
 
 def _no_nvidia_smi(*a, **kw):
@@ -154,12 +172,115 @@ def test_stop_kills_if_terminate_hangs(make_manifest):
         return p
 
     runner = LlamaServerRunner(
-        _cfg(), popen_factory=popen_factory, http_get=_healthy_get,
+        _cfg(), popen_factory=popen_factory, http_get=_get_healthy_after(2),
         sleep=lambda s: None, vram_poll_cmd=_no_nvidia_smi,
     )
     runner.start(make_manifest(), 4096)
     runner.stop()
     assert procs[0].terminated and procs[0].killed  # Windows-safe: terminate then kill
+
+
+def test_start_refuses_to_adopt_a_foreign_server_on_the_port(make_manifest):
+    """A server already answering on the port is NOT our artifact: adopting it would
+    report someone else's model as this artifact's scores."""
+    procs: list[FakePopen] = []
+
+    def popen_factory(cmd, **kw):
+        p = FakePopen(cmd, **kw)
+        procs.append(p)
+        return p
+
+    runner = LlamaServerRunner(
+        _cfg(), popen_factory=popen_factory, http_get=_healthy_get,
+        sleep=lambda s: None, vram_poll_cmd=_no_nvidia_smi,
+    )
+    with pytest.raises(RunnerError) as exc:
+        runner.start(make_manifest(), 4096)
+    msg = str(exc.value)
+    assert "port 18080 is already serving" in msg
+    assert "runtime.port" in msg and "openai-compat" in msg  # both escape hatches named
+    assert not procs  # nothing was launched
+
+
+class FakePoller:
+    """Stands in for the background nvidia-smi poller with a controllable peak."""
+
+    def __init__(self, peak: float | None = None):
+        self.peak = peak
+        self.stopped = False
+
+    def stop(self) -> None:
+        self.stopped = True
+
+    def join(self, timeout=None) -> None:
+        return None
+
+
+def test_peak_vram_is_visible_while_the_server_runs(make_manifest):
+    """FR-3.4 / the §5 VRAM blocker gate: perf.py snapshots peak_vram_mb BEFORE stop(),
+    so the live poller peak must be readable mid-run — not only after teardown."""
+    runner = LlamaServerRunner(
+        _cfg(), popen_factory=FakePopen, http_get=_get_healthy_after(2),
+        sleep=lambda s: None, vram_poll_cmd=_no_nvidia_smi,
+    )
+    runner.start(make_manifest(), 32768)
+    assert runner.peak_vram_mb is None  # no samples yet
+
+    poller = FakePoller(41000.0)
+    runner._poller = poller  # the real poller found no nvidia-smi; drive a fake one
+    # perf.py reads the runner with getattr while the server is still up:
+    assert getattr(runner, "peak_vram_mb", None) == 41000.0
+    poller.peak = 43250.0  # VRAM keeps climbing as the KV cache fills
+    assert runner.peak_vram_mb == 43250.0
+
+    runner.stop()
+    assert poller.stopped
+    assert runner.peak_vram_mb == 43250.0  # folded into the stored value at stop()
+
+
+class PortSim:
+    """Simulates the port honestly: it answers only while a process WE launched runs."""
+
+    def __init__(self) -> None:
+        self.up = False
+
+    def get(self, url, timeout=None):
+        if not self.up:
+            raise httpx.ConnectError("connection refused")
+        return SimpleNamespace(status_code=200)
+
+    def popen(self, cmd, **kw):
+        sim = self
+
+        class SimPopen(FakePopen):
+            def terminate(self):
+                sim.up = False
+                super().terminate()
+
+            def kill(self):
+                sim.up = False
+                super().kill()
+
+        self.up = True
+        return SimPopen(cmd, **kw)
+
+
+def test_peak_vram_resets_per_context(make_manifest):
+    sim = PortSim()
+    runner = LlamaServerRunner(
+        _cfg(), popen_factory=sim.popen, http_get=sim.get,
+        sleep=lambda s: None, vram_poll_cmd=_no_nvidia_smi,
+    )
+    runner.start(make_manifest(), 4096)
+    runner._poller = FakePoller(30000.0)
+    runner.stop()
+    assert runner.peak_vram_mb == 30000.0
+
+    runner.start(make_manifest(), 32768)  # new server, new context: peak starts over
+    assert runner.peak_vram_mb is None
+    runner._poller = FakePoller(38000.0)
+    runner.stop()
+    assert runner.peak_vram_mb == 38000.0
 
 
 def test_complete_requires_start():

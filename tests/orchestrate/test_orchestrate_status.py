@@ -26,5 +26,17 @@ def test_status_reports_failures_with_errors(harness):
     harness.fail_retentions = {0.5}
     harness.run()
     text = sweep_status(harness.spec)
-    assert "1 failed" in text
+    # the component's own prune:r0.5 row AND run_sweep's coarse sweep:r0.5 row
+    assert "2 failed" in text
+    assert "prune:r0.5" in text
+    assert "sweep:r0.5" in text
     assert "synthetic prune failure" in text
+
+
+def test_status_shows_manual_steps_distinctly_from_failures(harness):
+    harness.manual_retentions = {0.5}
+    harness.run()
+    text = sweep_status(harness.spec)
+    assert "1 awaiting a manual step" in text
+    assert "0 failed" in text
+    assert "[ manual] prune:r0.5" in text

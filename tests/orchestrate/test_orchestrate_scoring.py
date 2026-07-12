@@ -214,14 +214,51 @@ def test_vram_measured_path_reports_gb(pack, gates, baseline, summary_factory, p
     assert gate.value == pytest.approx(30000.0 / 1024.0)
 
 
-def test_vram_missing_context_entry_is_not_measured(pack, gates, baseline, summary_factory, perf_factory):
-    # perf only captured at 4k; the gate context is 32k
+def test_vram_missing_context_entry_falls_back_to_a_lower_bound(
+    pack, gates, baseline, summary_factory, perf_factory
+):
+    """[3]: perf only captured at 4k while the gate context is 32k. Peak VRAM grows
+    with context, so the 4k peak is a LOWER bound: under the limit it is merely
+    inconclusive (pass with a note), it is not 'unmeasured'."""
     candidate = summary_factory(
-        "r0.5-q4_k_m", alpha=0.88, beta=0.80, perf=perf_factory(contexts=(4096,))
+        "r0.5-q4_k_m", alpha=0.88, beta=0.80,
+        perf=perf_factory(vram_mb=30000.0, contexts=(4096,)),
     )
     gate = by_name(evaluate_gates(gates, candidate, baseline, candidate["perf"], pack=pack))["vram"]
     assert gate.passed
-    assert "not measured" in gate.note
+    assert gate.value == pytest.approx(30000.0 / 1024.0)
+    assert "LOWER BOUND" in gate.note
+    assert "4096" in gate.note
+
+
+def test_vram_lower_bound_over_the_limit_is_a_conclusive_fail(
+    pack, gates, baseline, summary_factory, perf_factory
+):
+    """The blocker used to disarm itself whenever gates.min_context was not in
+    runtime.contexts — even when the SMALLER context had already blown the budget."""
+    candidate = summary_factory(
+        "r0.5-q4_k_m", alpha=0.88, beta=0.80,
+        perf=perf_factory(vram_mb=45 * 1024, contexts=(4096,)),  # limit is 40 GB
+    )
+    results = evaluate_gates(gates, candidate, baseline, candidate["perf"], pack=pack)
+    gate = by_name(results)["vram"]
+    assert not gate.passed
+    assert gate.blocking
+    assert "Conclusive" in gate.note
+    assert select_winner([("r0.5-q4_k_m", 0.85, results)]) is None
+
+
+def test_vram_measured_only_above_min_context_is_an_upper_bound(
+    pack, gates, summary_factory, perf_factory
+):
+    gates.min_context = 8192  # measured contexts are 4096 and 32768
+    candidate = summary_factory(
+        "r0.5-q4_k_m", alpha=0.88, beta=0.80,
+        perf={"32768": perf_factory(vram_mb=30000.0, contexts=(32768,))["32768"]},
+    )
+    gate = by_name(evaluate_gates(gates, candidate, None, candidate["perf"], pack=pack))["vram"]
+    assert gate.passed
+    assert "LARGER" in gate.note  # 32k fits, so 8k certainly fits
 
 
 def test_rate_gates_not_measured(pack, gates, baseline, summary_factory):

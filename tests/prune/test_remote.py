@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import io
 import json
+import re
+import shutil
 import subprocess
 import tarfile
 from pathlib import Path
@@ -51,8 +53,7 @@ class TestRemoteScript:
         assert "git clone --recursive" in script
         assert "bash scripts/build.sh" in script  # reap's own uv build
         assert f"hf download {MODEL_ID}" in script  # model pre-download
-        assert "HF_TOKEN" in script  # token passthrough
-        assert "timeout 108000s" in script  # 75 USD / 2.5 USD/h * 3600
+        assert "HF_TOKEN" in script  # token passthrough (from the environment)
         assert "tar czf" in script  # output packaging
         assert "--compression-ratio 0.5" in script
         assert "$DATASET" in script  # dataset folder wired into the prune command
@@ -67,7 +68,60 @@ class TestRemoteScript:
             ),
         )
         assert budget_timeout_seconds(spec) == 9000
-        assert "timeout 9000s" in build_remote_script(spec, 0.5)
+        assert "9000s" in build_remote_script(spec, 0.5)
+
+
+class TestBudgetKillSwitch:
+    """The box bills by wall clock: a hung clone / uv sync / 60 GB model download costs
+    exactly as much as a hung prune, so the timeout must wrap the WHOLE script."""
+
+    def test_watchdog_wraps_the_entire_script_not_just_the_prune(self, tmp_path: Path):
+        spec = make_spec(tmp_path, profile="remote")  # 75 USD / 2.5 per h -> 108000s
+        script = build_remote_script(spec, 0.5)
+        timed = script.index("timeout -s TERM -k 60s 108000s bash")
+        # every billable step comes AFTER the self re-exec under timeout
+        for step in ("git clone --recursive", "bash scripts/build.sh", "hf download", "tar czf"):
+            assert script.index(step) > timed, f"{step} runs outside the kill switch"
+        assert script.count("timeout ") == 1  # the prune is no longer separately timed
+        prune_line = next(ln for ln in script.splitlines() if "src/reap/prune.py" in ln)
+        assert not prune_line.startswith("timeout")
+
+    def test_kill_switch_message_is_loud(self, tmp_path: Path):
+        script = build_remote_script(make_spec(tmp_path, profile="remote"), 0.5)
+        assert "BUDGET KILL SWITCH" in script
+        assert "$code -eq 124" in script  # GNU timeout's "killed" exit code is handled
+        assert "DESTROY THE INSTANCE" in script
+
+    def test_does_not_power_the_box_down(self, tmp_path: Path):
+        """Shutting down from inside the guest keeps most rentals billing (and kills the
+        shell you would fetch the tarball with). Teardown stays the user's call."""
+        script = build_remote_script(make_spec(tmp_path, profile="remote"), 0.5)
+        for forbidden in ("shutdown", "poweroff", "halt -p", "init 0"):
+            assert forbidden not in script
+
+    def test_no_accidental_shell_expansions(self, tmp_path: Path):
+        """`$75` in a double-quoted echo expands as the positional param $7 — and under
+        `set -u` an unbound `$2` aborts the whole run. Prices never sit next to a '$'."""
+        script = build_remote_script(make_spec(tmp_path, profile="remote"), 0.5)
+        for line in script.splitlines():
+            stripped = line.lstrip()
+            if stripped.startswith("#") or not stripped.startswith("echo"):
+                continue  # comments do not expand; "$0"/"$@" in the re-exec are deliberate
+            assert not re.search(r"\$\d", line), f"positional-param expansion in: {line}"
+
+    @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+    def test_script_is_valid_bash(self, tmp_path: Path):
+        script_path = tmp_path / "prune_remote_r0.5.sh"
+        script_path.write_text(
+            build_remote_script(make_spec(tmp_path, profile="remote"), 0.625),
+            encoding="utf-8",
+            newline="\n",
+        )
+        result = subprocess.run(
+            [shutil.which("bash"), "-n", str(script_path)],
+            capture_output=True, text=True, encoding="utf-8",
+        )
+        assert result.returncode == 0, result.stderr
 
     def test_zero_rate_is_instructive(self, tmp_path: Path):
         spec = make_spec(
@@ -182,22 +236,85 @@ class TestSshMode:
         # extraction produced the checkpoint
         assert (out / "config.json").exists()
 
-    def test_hf_token_is_passed_through(self, tmp_path, calibration_jsonl, monkeypatch):
+    def test_hf_token_is_piped_on_stdin_never_argv(self, tmp_path, calibration_jsonl, monkeypatch):
+        """The token must not reach argv: it would land in this machine's process list,
+        the on-disk log, the state DB error column, and the shareable report."""
         spec = self._spec(tmp_path)
         dataset = _dataset_dir(calibration_jsonl, tmp_path)
-        monkeypatch.setenv("HF_TOKEN", "hf_test123")
-        calls: list[list[str]] = []
+        monkeypatch.setenv("HF_TOKEN", "hf_secret123")
+        calls: list[tuple[list[str], str | None]] = []
 
         def fake_run(argv, **kwargs):
-            calls.append(list(argv))
+            calls.append((list(argv), kwargs.get("input")))
+            if argv[0] == "scp" and str(argv[1]).startswith(f"{HOST}:"):
+                _make_pruned_tar(Path(argv[2]))
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(profiles.subprocess, "run", fake_run)
+        work = tmp_path / "w"
+        RemoteProfile(work_dir=work).run_prune(spec, 0.5, dataset, tmp_path / "out")
+
+        run_argv, run_input = [c for c in calls if c[0][0] == "ssh"][1]
+        assert "hf_secret123" not in " ".join(run_argv)
+        assert run_argv[2] == (
+            "IFS= read -r HF_TOKEN; export HF_TOKEN; bash reap-work/prune_remote_r0.5.sh"
+        )
+        assert run_input == "hf_secret123\n"  # fed through the pipe instead
+        # ...and no other step got the secret either
+        assert not any("hf_secret123" in " ".join(argv) for argv, _ in calls)
+        # the on-disk log never contains it
+        log_text = (work / "remote-r0.5.log").read_text(encoding="utf-8")
+        assert "hf_secret123" not in log_text
+
+    def test_no_token_keeps_the_plain_run_command(self, tmp_path, calibration_jsonl, monkeypatch):
+        spec = self._spec(tmp_path)
+        dataset = _dataset_dir(calibration_jsonl, tmp_path)
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        calls: list[tuple[list[str], str | None]] = []
+
+        def fake_run(argv, **kwargs):
+            calls.append((list(argv), kwargs.get("input")))
             if argv[0] == "scp" and str(argv[1]).startswith(f"{HOST}:"):
                 _make_pruned_tar(Path(argv[2]))
             return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
         monkeypatch.setattr(profiles.subprocess, "run", fake_run)
         RemoteProfile(work_dir=tmp_path / "w").run_prune(spec, 0.5, dataset, tmp_path / "out")
-        run_step = [c for c in calls if c[0] == "ssh"][1]
-        assert run_step[2].startswith("HF_TOKEN=hf_test123 bash ")
+        run_argv, run_input = [c for c in calls if c[0][0] == "ssh"][1]
+        assert run_argv[2] == "bash reap-work/prune_remote_r0.5.sh"
+        assert run_input is None
+
+    def test_token_is_redacted_from_logs_and_errors(self, tmp_path, calibration_jsonl, monkeypatch):
+        """Belt and braces: even if a token reaches a rendered command (an old script, a
+        user-set SendEnv), nothing we log or raise may carry it."""
+        spec = self._spec(tmp_path)
+        dataset = _dataset_dir(calibration_jsonl, tmp_path)
+        work = tmp_path / "w"
+
+        def fake_run(argv, **kwargs):
+            return subprocess.CompletedProcess(
+                argv, 1, stdout="", stderr="tried HF_TOKEN=hf_leaked999 and failed"
+            )
+
+        monkeypatch.setattr(profiles.subprocess, "run", fake_run)
+        profile = RemoteProfile(work_dir=work)
+        monkeypatch.setattr(
+            profile,
+            "_run_over_ssh",
+            lambda spec, host, script_path, dataset_dir, tar_local, rtag: profile._ssh_step(
+                ["ssh", HOST, "HF_TOKEN=hf_leaked999 bash x.sh"],
+                what="run remote prune",
+                host=HOST,
+                timeout=None,
+                log_path=work / "remote-r0.5.log",
+            ),
+        )
+        with pytest.raises(PruneError) as exc:
+            profile.run_prune(spec, 0.5, dataset, tmp_path / "out")
+        msg = str(exc.value)
+        assert "hf_leaked999" not in msg
+        assert "HF_TOKEN=***" in msg
+        assert "hf_leaked999" not in (work / "remote-r0.5.log").read_text(encoding="utf-8")
 
     def test_remote_failure_is_instructive(self, tmp_path, calibration_jsonl, monkeypatch):
         spec = self._spec(tmp_path)

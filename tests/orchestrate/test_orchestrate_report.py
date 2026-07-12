@@ -158,9 +158,43 @@ def test_failed_section_empty_says_none(spec, pack, rows):
     assert "None." in failed_part
 
 
-def test_promotion_footer(md):
-    assert "reap-lab promote" in md
-    assert "--artifact r0.75-q4_k_m" in md
+def test_promotion_footer_matches_the_real_cli(md):
+    """[33]/[m1]/[m23]: the footer must be a command the CLI actually accepts."""
+    from typer.testing import CliRunner
+
+    from reaplab.cli.main import app
+
+    assert "uv run reap-lab promote <your-sweep.yaml>" in md
+    assert "--artifact <artifact-id>" in md
+    assert "--artifact r0.75-q4_k_m" not in md  # the old, non-existent form
+    # ...and --artifact really exists on the promote command
+    help_text = CliRunner().invoke(app, ["promote", "--help"]).output
+    assert "--artifact" in help_text
+
+
+def test_notes_section_surfaces_row_caveats(spec, pack, rows):
+    rows[1].notes = ["no baseline at quant Q5_K_M — relative gates not measured"]
+    text = render_report(spec, "cafe0123beef", pack, rows, "r0.75-q4_k_m", [])
+    notes = text.split("## Notes")[1].split("##")[0]
+    assert "r0.75-q4_k_m" in notes
+    assert "no baseline at quant Q5_K_M" in notes
+
+
+def test_manual_steps_section_is_not_a_failure_section(spec, pack, rows):
+    manual = [
+        {
+            "stage": "prune",
+            "key": "r0.5",
+            "instructions": "1. scp prune_remote_r0.5.sh gpu:~\n2. bash prune_remote_r0.5.sh",
+        }
+    ]
+    text = render_report(spec, "cafe0123beef", pack, rows, "r0.75-q4_k_m", [], manual)
+    assert "## Manual steps pending" in text
+    manual_part = text.split("## Manual steps pending")[1].split("## Promotion")[0]
+    assert "prune:r0.5" in manual_part
+    assert "bash prune_remote_r0.5.sh" in manual_part
+    failed_part = text.split("## Failed configs")[1].split("##")[0]
+    assert "None." in failed_part
 
 
 def test_no_html_in_report(md):

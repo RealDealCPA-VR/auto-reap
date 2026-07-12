@@ -31,13 +31,14 @@ def sweep_status(spec: SweepSpec) -> str:
         counts = Counter(job["status"] for job in jobs)
         lines.append(
             f"Stages: {counts.get('done', 0)} done, {counts.get('failed', 0)} failed, "
-            f"{counts.get('running', 0)} running"
+            f"{counts.get('running', 0)} running, {counts.get('manual', 0)} awaiting a manual step"
         )
         lines.append("")
         for job in jobs:
             line = f"  [{job['status']:>7}] {job['stage']}:{job['key']}"
-            if job["status"] == "failed" and job.get("error"):
-                line += f" — {job['error']}"
+            if job["status"] in ("failed", "manual") and job.get("error"):
+                first_line = str(job["error"]).strip().splitlines()[0]
+                line += f" — {first_line}"
             lines.append(line)
 
         artifacts = state.all_artifacts()

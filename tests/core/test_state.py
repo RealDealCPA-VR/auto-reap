@@ -39,3 +39,13 @@ def test_metrics(tmp_path):
         db.record_metric("r0.50-q4_k_m", "gate_status", "pass")
         assert db.metrics_for("r0.50-q4_k_m") == {"weighted_score": 0.93, "gate_status": "pass"}
         assert db.all_artifacts() == ["r0.50-q4_k_m"]
+
+
+def test_manual_status(tmp_path):
+    with StateDB(tmp_path / "s.db") as db:
+        db.mark_manual("prune", "r0.5", "run the remote script: workspace/prune/prune_remote_r0.5.sh")
+        assert db.status("prune", "r0.5") == "manual"
+        job = db.jobs("prune")[0]
+        assert "remote script" in job["error"]
+        db.mark_done("prune", "r0.5")
+        assert db.is_done("prune", "r0.5")

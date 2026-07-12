@@ -7,13 +7,17 @@ import pytest
 import respx
 
 from reaplab.core.config import RuntimeCfg
-from reaplab.evalharness.runners import OpenAICompatRunner, RunnerError
+from reaplab.evalharness.runners import OpenAICompatRunner, RunnerError, runner_from_runtime
 
 BASE = "http://localhost:1234/v1"
 
 
-def _runner(**kw) -> OpenAICompatRunner:
-    return OpenAICompatRunner(RuntimeCfg(kind="openai-compat", base_url=BASE), **kw)
+def _runner(cfg: RuntimeCfg | None = None, **kw) -> OpenAICompatRunner:
+    return OpenAICompatRunner(cfg or RuntimeCfg(kind="openai-compat", base_url=BASE), **kw)
+
+
+def _models(*names: str) -> httpx.Response:
+    return httpx.Response(200, json={"data": [{"id": n, "object": "model"} for n in names]})
 
 
 def _chat_response(content="hello", tool_calls=None, timings=None):
@@ -109,3 +113,55 @@ def test_stop_is_a_noop_and_record_ignored(make_manifest):
     runner = _runner()
     runner.stop()  # never raises, launches nothing
     assert runner.load_time_s is None and runner.peak_vram_mb is None
+
+
+# -- runtime.model: the server-side name, verified against GET /models -------------
+
+
+@respx.mock
+def test_runtime_model_is_requested_and_verified(make_manifest):
+    """LM Studio/Ollama route on THEIR model name, which is never our artifact id."""
+    respx.get(f"{BASE}/models").mock(return_value=_models("qwen3-30b-a3b", "nomic-embed"))
+    chat = respx.post(f"{BASE}/chat/completions").mock(return_value=_chat_response("ok"))
+    cfg = RuntimeCfg(kind="openai-compat", base_url=BASE, model="qwen3-30b-a3b")
+    runner = runner_from_runtime(cfg)  # the wiring users actually get
+    assert isinstance(runner, OpenAICompatRunner)
+
+    runner.start(make_manifest(artifact_id="r0.5-q4_k_m", kind="gguf", retention=0.5), 4096)
+    runner.complete("hi", max_tokens=8)
+    assert json.loads(chat.calls.last.request.content)["model"] == "qwen3-30b-a3b"
+
+
+@respx.mock
+def test_unserved_model_is_an_instructive_error(make_manifest):
+    respx.get(f"{BASE}/models").mock(return_value=_models("qwen3-30b-a3b", "llama-3.1-8b"))
+    cfg = RuntimeCfg(kind="openai-compat", base_url=BASE, model="qwen-30b")  # typo
+    with pytest.raises(RunnerError) as exc:
+        _runner(cfg).start(make_manifest(), 4096)
+    msg = str(exc.value)
+    assert "'qwen-30b'" in msg  # what we asked for
+    assert "'qwen3-30b-a3b'" in msg and "'llama-3.1-8b'" in msg  # what the server has
+    assert "runtime.model" in msg  # how to fix it
+
+
+@respx.mock
+def test_artifact_id_fallback_is_verified_too(make_manifest):
+    """With no runtime.model set, the artifact id is sent — and a server that clearly
+    does not serve it must say so instead of misrouting every request."""
+    respx.get(f"{BASE}/models").mock(return_value=_models("qwen3-30b-a3b"))
+    with pytest.raises(RunnerError, match="does not serve a model named 'r0.5-q4_k_m'"):
+        _runner().start(make_manifest(artifact_id="r0.5-q4_k_m", kind="gguf", retention=0.5), 4096)
+
+
+@respx.mock
+def test_unenumerable_model_list_does_not_block_the_eval(make_manifest):
+    """Servers that answer /models with an empty or odd body must not fail the run:
+    'cannot enumerate' is not 'does not serve it'."""
+    respx.get(f"{BASE}/models").mock(return_value=httpx.Response(200, json={"data": []}))
+    respx.post(f"{BASE}/chat/completions").mock(return_value=_chat_response("ok"))
+    runner = _runner(model="whatever")
+    runner.start(make_manifest(), 4096)  # no raise
+    assert runner.served_models == []
+
+    respx.get(f"{BASE}/models").mock(return_value=httpx.Response(200, text="not json"))
+    _runner(model="whatever").start(make_manifest(), 4096)  # no raise

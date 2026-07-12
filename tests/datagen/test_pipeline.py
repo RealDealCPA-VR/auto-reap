@@ -18,6 +18,7 @@ from reaplab.core.state import StateDB
 from reaplab.datagen import (
     AUDIT_SAMPLE_FILENAME,
     DEDUP_REPORT_FILENAME,
+    dataset_dir,
     estimate_tokens,
     generate_datasets,
     plan_counts,
@@ -32,13 +33,20 @@ def _run(spec, tmp_root: Path, name: str = "ws") -> tuple[Path, Path, Workspace]
     return cal, ev, ws
 
 
+def _data(spec, ws: Workspace) -> Path:
+    """Where this spec's datasets live: runs/<config_hash>/data (contract C1)."""
+    return dataset_dir(spec, ws)
+
+
 def test_writes_expected_files_and_counts(make_spec, tmp_path):
     spec = make_spec()
     cal_path, eval_path, ws = _run(spec, tmp_path)
-    assert cal_path == ws.data / "calibration_v1.jsonl"
-    assert eval_path == ws.data / "eval_v1.jsonl"
+    data = _data(spec, ws)
+    assert data == ws.run_dir(spec.config_hash()) / "data"  # per-sweep, next to state.db
+    assert cal_path == data / "calibration_v1.jsonl"
+    assert eval_path == data / "eval_v1.jsonl"
     for f in OUTPUTS:
-        assert (ws.data / f).exists(), f"missing output {f}"
+        assert (data / f).exists(), f"missing output {f}"
 
     cal = read_jsonl(cal_path, CalibrationRecord)
     ev = read_jsonl(eval_path, EvalRecord)
@@ -117,18 +125,22 @@ def test_same_seed_produces_identical_files(make_spec, tmp_path):
     _, _, ws_a = _run(spec, tmp_path, "a")
     _, _, ws_b = _run(spec, tmp_path, "b")
     for f in OUTPUTS:
-        assert (ws_a.data / f).read_bytes() == (ws_b.data / f).read_bytes(), f
+        assert (_data(spec, ws_a) / f).read_bytes() == (_data(spec, ws_b) / f).read_bytes(), f
 
 
 def test_different_seed_produces_different_data(make_spec, tmp_path):
-    _, _, ws_a = _run(make_spec(), tmp_path, "a")
-    _, _, ws_b = _run(make_spec(seeds=[7]), tmp_path, "b")
-    assert (ws_a.data / "eval_v1.jsonl").read_bytes() != (ws_b.data / "eval_v1.jsonl").read_bytes()
+    spec_a, spec_b = make_spec(), make_spec(seeds=[7])
+    _, _, ws_a = _run(spec_a, tmp_path, "a")
+    _, _, ws_b = _run(spec_b, tmp_path, "b")
+    a = (_data(spec_a, ws_a) / "eval_v1.jsonl").read_bytes()
+    b = (_data(spec_b, ws_b) / "eval_v1.jsonl").read_bytes()
+    assert a != b
 
 
 def test_dedup_report_written_and_consistent(make_spec, tmp_path):
-    _, eval_path, ws = _run(make_spec(), tmp_path)
-    report = json.loads((ws.data / DEDUP_REPORT_FILENAME).read_text(encoding="utf-8"))
+    spec = make_spec()
+    _, eval_path, ws = _run(spec, tmp_path)
+    report = json.loads((_data(spec, ws) / DEDUP_REPORT_FILENAME).read_text(encoding="utf-8"))
     ev = read_jsonl(eval_path, EvalRecord)
     assert report["backend"] == "fuzzy"
     assert report["eval_kept"] == len(ev)
@@ -140,14 +152,15 @@ def test_embedding_backend_works_offline_via_mock_embeddings(make_spec, tmp_path
         data=DataCfg(calibration_size=20, eval_size=10, dedup_backend="embedding")
     )
     _, eval_path, ws = _run(spec, tmp_path)
-    report = json.loads((ws.data / DEDUP_REPORT_FILENAME).read_text(encoding="utf-8"))
+    report = json.loads((_data(spec, ws) / DEDUP_REPORT_FILENAME).read_text(encoding="utf-8"))
     assert report["backend"] == "embedding"
     assert len(read_jsonl(eval_path, EvalRecord)) == report["eval_kept"]
 
 
 def test_audit_sample_written_with_min_ten_items(make_spec, tmp_path):
-    _, eval_path, ws = _run(make_spec(), tmp_path)
-    text = (ws.data / AUDIT_SAMPLE_FILENAME).read_text(encoding="utf-8")
+    spec = make_spec()
+    _, eval_path, ws = _run(spec, tmp_path)
+    text = (_data(spec, ws) / AUDIT_SAMPLE_FILENAME).read_text(encoding="utf-8")
     ev = read_jsonl(eval_path, EvalRecord)
     sampled = text.count("### ev-")
     assert sampled == max(10, round(0.05 * len(ev)))
@@ -170,6 +183,75 @@ def test_state_marked_done_and_resume_short_circuits(make_spec, tmp_path, monkey
         monkeypatch.setattr("reaplab.datagen.pipeline.plan_counts", _boom)
         cal2, ev2 = generate_datasets(spec, ws, state=db)
         assert (cal2, ev2) == (cal1, ev1)
+
+
+def test_reuse_without_statedb_never_regenerates(make_spec, tmp_path, monkeypatch):
+    """Contract C1: the CLI passes no StateDB. Existing datasets for this config hash
+    must still be reused as-is — otherwise every `reap-lab eval` silently replaces the
+    audited dataset (and, with a live generator, scores against a different eval set)."""
+    spec = make_spec()
+    cal1, ev1, ws = _run(spec, tmp_path)
+    before = ev1.read_bytes()
+
+    def _boom(*a, **k):  # pragma: no cover - only on regression
+        raise AssertionError("datasets regenerated despite both files existing")
+
+    monkeypatch.setattr("reaplab.datagen.pipeline.plan_counts", _boom)
+    cal2, ev2 = generate_datasets(spec, ws)
+    assert (cal2, ev2) == (cal1, ev1)
+    assert ev2.read_bytes() == before
+
+
+def test_reuse_marks_a_fresh_statedb_done(make_spec, tmp_path):
+    """`generate` (no state) then `sweep` (fresh state DB): the sweep must resume, not
+    regenerate — so reuse records the stage."""
+    spec = make_spec()
+    cal, ev, ws = _run(spec, tmp_path)
+    with StateDB(tmp_path / "fresh.db") as db:
+        assert not db.is_done("datagen", "datagen")
+        cal2, ev2 = generate_datasets(spec, ws, state=db)
+        assert (cal2, ev2) == (cal, ev)
+        job = db.jobs("datagen")[0]
+        assert job["status"] == "done"
+        assert job["meta"]["reused"] is True
+        assert job["meta"]["eval_count"] == 35
+
+
+def test_two_specs_in_one_workspace_do_not_share_datasets(make_spec, tmp_path):
+    """The bug this contract closes: spec B's datagen used to overwrite
+    workspace/data/eval_v1.jsonl, and a resumed spec A then scored on B's eval set."""
+    spec_a = make_spec()
+    spec_b = make_spec(seeds=[7])
+    assert spec_a.config_hash() != spec_b.config_hash()
+    ws = Workspace(tmp_path / "shared").ensure()
+
+    cal_a, ev_a = generate_datasets(spec_a, ws)
+    a_bytes = ev_a.read_bytes()
+    cal_b, ev_b = generate_datasets(spec_b, ws)
+
+    assert ev_a != ev_b and cal_a != cal_b  # different files entirely
+    assert spec_a.config_hash() in str(ev_a)
+    assert spec_b.config_hash() in str(ev_b)
+    assert ev_a.read_bytes() == a_bytes  # A's eval set is untouched
+    assert ev_b.read_bytes() != a_bytes
+
+
+def test_pack_edit_mints_a_new_dataset_dir(make_spec, make_pack_file, tmp_path, mini_pack_dict):
+    """Editing the pack changes the config hash (content is hashed), so the edited spec
+    cannot reuse the old spec's datasets — it gets a data dir of its own."""
+    spec_a = make_spec()
+    ws = Workspace(tmp_path / "ws").ensure()
+    _, ev_a = generate_datasets(spec_a, ws)
+
+    edited = mini_pack_dict
+    edited["domains"][0]["weight"] = 9.0  # re-weighting changes the item allocation
+    edited_path = make_pack_file(edited, filename="pack_edited.yaml")
+    spec_b = spec_a.model_copy(update={"domain_pack": str(edited_path)})
+    assert spec_b.config_hash() != spec_a.config_hash()
+
+    _, ev_b = generate_datasets(spec_b, ws)
+    assert ev_a != ev_b
+    assert ev_a.read_bytes() != ev_b.read_bytes()
 
 
 def test_missing_files_force_regeneration_even_when_state_done(make_spec, tmp_path):
@@ -230,7 +312,7 @@ def test_pre_existing_datasets_are_reused_not_regenerated(make_spec, tmp_path):
     ev = read_jsonl(eval_path, EvalRecord)
     assert [r.id for r in cal] == ["cal-900001", "cal-900002"]
     assert [r.id for r in ev] == ["ev-900001"]
-    assert cal_path.parent == ws.data  # re-emitted into the workspace
+    assert cal_path.parent == _data(spec, ws)  # re-emitted into this sweep's data dir
 
 
 def test_pre_existing_path_missing_is_instructive(make_spec, tmp_path):

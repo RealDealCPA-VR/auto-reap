@@ -48,6 +48,41 @@ def test_demo_end_to_end_with_promotion(tmp_path):
     assert (ws / "demo-pack.yaml").exists()
 
 
+def test_demo_datasets_live_under_the_per_sweep_run_dir(tmp_path):
+    """C1: datasets are keyed by config hash (runs/<hash>/data), never at a shared
+    workspace/data path a second sweep could overwrite."""
+    ws = tmp_path / "demo"
+    result = runner.invoke(app, ["demo", "--workspace", str(ws), "--no-show-report"])
+    assert result.exit_code == 0, result.output
+
+    workspace = ws / "workspace"
+    eval_sets = list(workspace.glob("runs/*/data/eval_v1.jsonl"))
+    assert len(eval_sets) == 1, "exactly one per-sweep eval set"
+    run_dir = eval_sets[0].parent.parent
+    assert (run_dir / "data" / "calibration_v1.jsonl").exists()
+    assert (run_dir / "state.db").exists()  # datasets sit next to the sweep's state
+    assert not (workspace / "data" / "eval_v1.jsonl").exists(), "old shared location"
+
+
+def test_report_command_is_a_true_rerender(tmp_path):
+    """[34]: `reap-lab report` re-renders from the state DB — no datagen, no builds,
+    no evals — and produces the same report the sweep wrote."""
+    ws = tmp_path / "demo"
+    assert runner.invoke(app, ["demo", "--workspace", str(ws), "--no-show-report"]).exit_code == 0
+    report = next((ws / "workspace" / "reports").glob("sweep-*.md"))
+
+    def stable(md: str) -> str:
+        return "\n".join(line for line in md.splitlines() if not line.startswith("- **Date:**"))
+
+    before = stable(report.read_text(encoding="utf-8"))
+    result = runner.invoke(app, ["report", str(ws / "demo-sweep.yaml")])
+    assert result.exit_code == 0, result.output
+    assert "Report:" in result.output
+    assert stable(report.read_text(encoding="utf-8")) == before
+    # a re-render touches no dataset/artifact stage, so nothing new appears on disk
+    assert len(list((ws / "workspace" / "reports").glob("sweep-*.md"))) == 1
+
+
 def test_demo_is_deterministic_and_resumable(tmp_path):
     ws = tmp_path / "demo"
     first = runner.invoke(app, ["demo", "--workspace", str(ws), "--no-show-report"])

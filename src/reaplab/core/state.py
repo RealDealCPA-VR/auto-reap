@@ -21,7 +21,7 @@ _SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
     stage TEXT NOT NULL,
     key TEXT NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('running', 'done', 'failed')),
+    status TEXT NOT NULL CHECK (status IN ('running', 'done', 'failed', 'manual')),
     started_at TEXT,
     finished_at TEXT,
     error TEXT,
@@ -75,6 +75,17 @@ class StateDB:
             "VALUES (?, ?, 'done', ?, ?, ?) "
             "ON CONFLICT(stage, key) DO UPDATE SET status='done', finished_at=?, meta=?, error=NULL",
             (stage, key, _now(), _now(), json.dumps(meta or {}), _now(), json.dumps(meta or {})),
+        )
+        self._conn.commit()
+
+    def mark_manual(self, stage: str, key: str, instructions: str) -> None:
+        """A stage waiting on a user action (e.g. running the generated remote-prune
+        script) — distinct from 'failed' so reports and status don't mislabel it."""
+        self._conn.execute(
+            "INSERT INTO jobs (stage, key, status, started_at, finished_at, error) "
+            "VALUES (?, ?, 'manual', ?, ?, ?) "
+            "ON CONFLICT(stage, key) DO UPDATE SET status='manual', finished_at=?, error=?",
+            (stage, key, _now(), _now(), instructions[:4000], _now(), instructions[:4000]),
         )
         self._conn.commit()
 

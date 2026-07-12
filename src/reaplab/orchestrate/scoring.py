@@ -131,6 +131,100 @@ def _weighted_of(summary: Mapping[str, Any] | None, pack: DomainPack | None) -> 
     return sum(quality) / len(quality)
 
 
+def _vram_gate(
+    gates: Gates, perf: Mapping[str, Mapping[str, Any]], ctx_entry: Mapping[str, Any]
+) -> GateResult:
+    """Peak-VRAM blocker (PRD section 5) with a physics-aware fallback.
+
+    Peak VRAM is monotonically non-decreasing in context length (the KV cache
+    grows with it), so when ``gates.min_context`` itself was never measured the
+    largest measured context still carries information:
+
+    - measured context BELOW min_context -> its peak is a LOWER BOUND on the
+      peak at min_context. Already over the limit => conclusive FAIL. Under the
+      limit => inconclusive, so the gate passes with a lower-bound note.
+    - measured context ABOVE min_context -> its peak is an UPPER BOUND. Under
+      the limit => conclusive PASS. Over the limit => inconclusive (the gate
+      does not block on unmeasured data), pass with a note saying so.
+
+    The old behavior (silently "not measured", always pass) let a candidate that
+    had *already* blown the VRAM budget at a smaller context sail through.
+    """
+    vram_mb = ctx_entry.get("peak_vram_mb")
+    if vram_mb is not None:
+        vram_gb = float(vram_mb) / 1024.0
+        return GateResult(
+            name="vram",
+            value=vram_gb,
+            limit=gates.max_vram_gb,
+            passed=vram_gb <= gates.max_vram_gb,
+            note=f"peak VRAM at {gates.min_context} context",
+        )
+
+    measured = {
+        int(key): float(entry["peak_vram_mb"])
+        for key, entry in perf.items()
+        if key.isdigit() and entry.get("peak_vram_mb") is not None
+    }
+    if not measured:
+        return GateResult(
+            name="vram",
+            value=None,
+            limit=gates.max_vram_gb,
+            passed=True,
+            note=f"not measured at context {gates.min_context}",
+        )
+
+    ctx = max(measured)
+    vram_gb = measured[ctx] / 1024.0
+    over = vram_gb > gates.max_vram_gb
+    if ctx < gates.min_context:
+        note = (
+            f"not measured at {gates.min_context}; peak {vram_gb:.1f} GB at context {ctx} is a "
+            "LOWER BOUND (VRAM grows with context)"
+        )
+        if over:
+            return GateResult(
+                name="vram",
+                value=vram_gb,
+                limit=gates.max_vram_gb,
+                passed=False,
+                note=note + " — already over the limit, so it cannot fit at "
+                f"{gates.min_context}. Conclusive failure.",
+            )
+        return GateResult(
+            name="vram",
+            value=vram_gb,
+            limit=gates.max_vram_gb,
+            passed=True,
+            note=note + f" — under the limit there, but the peak at {gates.min_context} is "
+            f"unknown. Add {gates.min_context} to runtime.contexts to measure it.",
+        )
+    # ctx >= min_context: an upper bound on the peak at min_context.
+    if not over:
+        return GateResult(
+            name="vram",
+            value=vram_gb,
+            limit=gates.max_vram_gb,
+            passed=True,
+            note=(
+                f"not measured at {gates.min_context}; peak {vram_gb:.1f} GB at the LARGER "
+                f"context {ctx} is under the limit, so {gates.min_context} fits too"
+            ),
+        )
+    return GateResult(
+        name="vram",
+        value=vram_gb,
+        limit=gates.max_vram_gb,
+        passed=True,
+        note=(
+            f"not measured at {gates.min_context}; peak {vram_gb:.1f} GB at the LARGER context "
+            f"{ctx} exceeds the limit, but that is only an upper bound — add {gates.min_context} "
+            "to runtime.contexts to measure the gate context directly"
+        ),
+    )
+
+
 def evaluate_gates(
     gates: Gates,
     candidate_summary: Mapping[str, Any],
@@ -217,28 +311,7 @@ def evaluate_gates(
     # 3. Peak VRAM at gates.min_context <= max_vram_gb (blocker).
     perf = _normalize_perf(perf_by_ctx if perf_by_ctx is not None else candidate_summary.get("perf"))
     ctx_entry = perf.get(str(gates.min_context)) or {}
-    vram_mb = ctx_entry.get("peak_vram_mb")
-    if vram_mb is None:
-        results.append(
-            GateResult(
-                name="vram",
-                value=None,
-                limit=gates.max_vram_gb,
-                passed=True,
-                note=f"not measured at context {gates.min_context}",
-            )
-        )
-    else:
-        vram_gb = float(vram_mb) / 1024.0
-        results.append(
-            GateResult(
-                name="vram",
-                value=vram_gb,
-                limit=gates.max_vram_gb,
-                passed=vram_gb <= gates.max_vram_gb,
-                note=f"peak VRAM at {gates.min_context} context",
-            )
-        )
+    results.append(_vram_gate(gates, perf, ctx_entry))
 
     # 4. False refusal <= absolute limit AND <= baseline rate when known (blocker).
     fr = candidate_summary.get("false_refusal_rate")

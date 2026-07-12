@@ -24,6 +24,7 @@ import re
 import shutil
 import subprocess
 import tarfile
+import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 
@@ -44,7 +45,25 @@ MOCK_BASE_EXPERTS = 128
 #: Remote work dir, relative to $HOME on the rented box.
 REMOTE_WORKDIR = "reap-work"
 
+#: Escape hatch for the local-offload Windows block (see LocalOffloadProfile).
+ALLOW_LOCAL_OFFLOAD_ENV = "REAPLAB_ALLOW_LOCAL_OFFLOAD"
+
 _SAFE_TOKEN = re.compile(r"^[A-Za-z0-9_@%+=:,./\-]+$")
+
+#: Any ``HF_TOKEN=<value>`` occurrence in a rendered command line. Secrets must never
+#: reach the on-disk log, an exception message, the state DB, or the sweep report.
+_TOKEN_RE = re.compile(r"(HF_TOKEN=)\S+")
+
+
+def redact(text: str) -> str:
+    """Mask HF_TOKEN values in any string we log or raise (PRD/doc promise: never logged)."""
+    return _TOKEN_RE.sub(r"\1***", text)
+
+
+def _display(argv: list[str]) -> str:
+    """Redacted, human-readable form of an argv list — the only form that is ever
+    written to a log or embedded in an error message."""
+    return redact(" ".join(argv))
 
 
 def _shell_join(tokens: list[str]) -> str:
@@ -94,15 +113,42 @@ def resolve_hf_model_dir(model_id: str) -> Path:
     )
 
 
-def _run_logged(argv: list[str], *, cwd: Path | None, log_path: Path) -> None:
+def _tree_rss_gb(proc_handle: object) -> float:
+    """Resident memory of a process plus its children, in GB. 0.0 when unmeasurable."""
+    try:
+        import psutil  # noqa: PLC0415 - optional-ish, only used while a prune runs
+    except ImportError:  # pragma: no cover - psutil is a hard dependency, defensive only
+        return 0.0
+    total = 0
+    try:
+        procs = [proc_handle, *proc_handle.children(recursive=True)]  # type: ignore[attr-defined]
+        for p in procs:
+            try:
+                total += p.memory_info().rss
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+    except (psutil.NoSuchProcess, psutil.AccessDenied, AttributeError):
+        return 0.0
+    return total / 1e9
+
+
+def _run_logged(
+    argv: list[str], *, cwd: Path | None, log_path: Path, track_peak_mem: bool = False
+) -> float | None:
     """Run one subprocess, streaming combined stdout/stderr into *log_path*.
 
-    List argv only (never shell=True). Raises :class:`PruneError` with the
-    log location on non-zero exit.
+    List argv only (never shell=True). Raises :class:`PruneError` with the log
+    location on non-zero exit; the rendered command is always redacted, so a
+    secret in the environment can never leak into the log or the message.
+
+    With ``track_peak_mem`` the process tree's resident memory is sampled while
+    output streams (at most every 2s — the prune prints progress continuously),
+    and the peak is returned in GB. Returns None when not tracking or unmeasurable.
     """
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    peak_gb = 0.0
     with open(log_path, "a", encoding="utf-8", newline="\n") as log:
-        log.write(f"\n$ {' '.join(argv)}\n")
+        log.write(f"\n$ {_display(argv)}\n")
         log.flush()
         try:
             proc = subprocess.Popen(  # noqa: S603 - list argv, no shell
@@ -118,14 +164,35 @@ def _run_logged(argv: list[str], *, cwd: Path | None, log_path: Path) -> None:
             raise PrerequisiteError(
                 f"Cannot run '{argv[0]}': executable not found. Install it and re-run."
             ) from e
+        handle = None
+        if track_peak_mem:
+            try:
+                import psutil  # noqa: PLC0415
+
+                handle = psutil.Process(proc.pid)
+            except Exception:  # noqa: BLE001 - sampling is best-effort, never fatal
+                handle = None
+        last_sample = 0.0
         assert proc.stdout is not None
         for line in proc.stdout:
             log.write(line)
+            if handle is not None and time.monotonic() - last_sample >= 2.0:
+                last_sample = time.monotonic()
+                peak_gb = max(peak_gb, _tree_rss_gb(handle))
         code = proc.wait()
     if code != 0:
         raise PruneError(
-            f"Command failed (exit {code}): {' '.join(argv)}\nFull output: {log_path}"
+            f"Command failed (exit {code}): {_display(argv)}\nFull output: {log_path}"
         )
+    if not track_peak_mem or peak_gb <= 0:
+        return None
+    return round(peak_gb, 3)
+
+
+def _is_hf_checkpoint(d: Path) -> bool:
+    """A directory only counts as a checkpoint when it carries BOTH a config.json
+    and at least one weight shard — a bare config.json is a config file, not a model."""
+    return (d / "config.json").exists() and any(d.glob("*.safetensors"))
 
 
 def _find_pruned_checkpoint(root: Path) -> Path:
@@ -133,15 +200,24 @@ def _find_pruned_checkpoint(root: Path) -> Path:
 
     REAP writes ``results_dir/pruned_models/{method}-{seed}-{ratio}`` but the
     exact results-dir mechanism is UNCONFIRMED (research brief), so we search:
-    prefer ``config.json`` parents living under a ``pruned_models`` directory,
-    else any ``config.json`` parent; newest wins.
+    prefer ``config.json`` parents living under a ``pruned_models`` directory.
+
+    Outside ``pruned_models`` the search is deliberately strict: a fallback
+    candidate must look like a real checkpoint (config.json AND at least one
+    ``*.safetensors``), otherwise the newest random ``config.json`` in the reap
+    clone (e.g. a tokenizer or hydra config folder) would be shipped as "the
+    pruned model" and only fail much later, in llama.cpp.
     """
     candidates = [p.parent for p in root.rglob("config.json")]
     preferred = [c for c in candidates if "pruned_models" in c.parts]
-    pool = preferred or candidates
+    pool = preferred or [c for c in candidates if _is_hf_checkpoint(c)]
     if not pool:
+        seen = "\n".join(f"  - {c}" for c in sorted(candidates)[:10]) or "  (none)"
         raise PruneError(
-            f"REAP finished but no pruned checkpoint (config.json) was found under {root}.\n"
+            f"REAP finished but no pruned checkpoint was found under {root}.\n"
+            "A checkpoint is a directory holding config.json AND at least one *.safetensors "
+            "(or any directory under 'pruned_models/').\n"
+            f"Directories with a config.json that were rejected:\n{seen}\n"
             "The repo's results layout may have changed -- check the run log, find the "
             "'pruned_models' output directory manually, and copy it into the workspace."
         )
@@ -149,9 +225,20 @@ def _find_pruned_checkpoint(root: Path) -> Path:
 
 
 class ExecutionProfile(ABC):
-    """Common interface: produce a local pruned HF checkpoint directory."""
+    """Common interface: produce a local pruned HF checkpoint directory.
+
+    After :meth:`run_prune`, ``peak_mem_gb`` carries the measured peak resident
+    memory of the prune when this machine actually hosted it, else None with
+    ``peak_mem_note`` stating WHY it is missing (PRD FR-2.3 provenance: an absent
+    number must be explained, never silently null).
+    """
 
     name: str = "base"
+
+    #: peak host RSS of the prune, GB — set by profiles that run it locally.
+    peak_mem_gb: float | None = None
+    #: why peak_mem_gb is None (recorded in the manifest's versions map).
+    peak_mem_note: str = "not measured"
 
     @abstractmethod
     def run_prune(self, spec: SweepSpec, retention: float, dataset_dir: Path, out_dir: Path) -> Path:
@@ -172,6 +259,7 @@ class MockProfile(ExecutionProfile):
     """
 
     name = "mock"
+    peak_mem_note = "not measured: the mock profile fabricates the checkpoint (no prune runs)"
 
     def __init__(self, base_experts: int = MOCK_BASE_EXPERTS):
         self.base_experts = base_experts
@@ -205,12 +293,19 @@ class MockProfile(ExecutionProfile):
 class LocalOffloadProfile(ExecutionProfile):
     """Run REAP on this machine (GPU + system-RAM offload). Slow but free.
 
-    Requires: git, uv, and the model pre-downloaded into the HF cache. Every
-    missing prerequisite raises :class:`PrerequisiteError` with the install
-    command; nothing surfaces as a raw stack trace.
+    Requires: a Linux-like host, git, uv, and the model pre-downloaded into the HF
+    cache. Every missing prerequisite raises :class:`PrerequisiteError` with the
+    install command; nothing surfaces as a raw stack trace.
+
+    NOT supported on Windows: reap's locked environment pins vllm (and the CUDA
+    torch build it needs), which has no Windows wheels -- ``uv sync`` fails during
+    resolution, minutes into the run. We say so up front instead. Set
+    ``REAPLAB_ALLOW_LOCAL_OFFLOAD=1`` to try anyway (e.g. inside WSL with a
+    Windows-looking os.name, or once upstream ships wheels).
     """
 
     name = "local-offload"
+    peak_mem_note = "not measured: the prune process exposed no sampleable memory"
 
     def __init__(self, work_dir: Path, log_dir: Path | None = None):
         self.work_dir = Path(work_dir)
@@ -220,6 +315,19 @@ class LocalOffloadProfile(ExecutionProfile):
         out_dir = Path(out_dir)
         if (out_dir / "config.json").exists():
             return out_dir  # already produced (resume)
+
+        if os.name == "nt" and os.environ.get(ALLOW_LOCAL_OFFLOAD_ENV) != "1":
+            raise PrerequisiteError(
+                "execution_profile: local-offload cannot run on Windows.\n"
+                "REAP's pinned environment requires vllm (plus its CUDA torch build), which "
+                "publishes no Windows wheels -- `uv sync` would fail during resolution.\n"
+                "Pick one:\n"
+                "  * prune.execution_profile: remote   -- rent an 80 GB GPU box; reap-lab "
+                "generates and (with prune.remote.ssh_host) drives the whole script.\n"
+                "  * prune.execution_profile: mock     -- offline dry run of the full pipeline.\n"
+                "  * run reap-lab from Linux/WSL with the GPU passed through.\n"
+                f"Override (at your own risk): set {ALLOW_LOCAL_OFFLOAD_ENV}=1."
+            )
 
         git = shutil.which("git")
         if not git:
@@ -249,8 +357,14 @@ class LocalOffloadProfile(ExecutionProfile):
         # reap is uv-managed; scripts/build.sh is bash-only so on Windows we
         # build the env directly with uv.
         _run_logged([uv, "sync"], cwd=repo, log_path=log)
-        prune_cmd = [uv, "run", *build_prune_command(spec, retention, dataset_dir)]
-        _run_logged(prune_cmd, cwd=repo, log_path=log)
+        # REAP hands the path to HF `load_dataset()`; a Windows drive path with
+        # backslashes is mangled by its glob/URI handling, so pass POSIX form
+        # ("C:/Users/.../dataset"), which pathlib and datasets both accept.
+        dataset_arg = Path(dataset_dir).as_posix()
+        prune_cmd = [uv, "run", *build_prune_command(spec, retention, dataset_arg)]
+        peak = _run_logged(prune_cmd, cwd=repo, log_path=log, track_peak_mem=True)
+        if peak is not None:
+            self.peak_mem_gb = peak
 
         found = _find_pruned_checkpoint(repo)
         out_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -262,9 +376,19 @@ def build_remote_script(spec: SweepSpec, retention: float) -> str:
     """Self-contained provisioning bash script for a rented 80 GB GPU box.
 
     Clones reap at the pinned commit, builds via ``scripts/build.sh`` (uv),
-    pre-downloads the model (HF_TOKEN passthrough), expects the dataset folder
-    at ``$WORK/dataset``, runs the prune under a budget kill switch
-    (``timeout``), and tars the pruned output for download.
+    pre-downloads the model (HF_TOKEN passed through the environment, never argv),
+    expects the dataset folder at ``$WORK/dataset``, runs the prune, and tars the
+    pruned output for download.
+
+    The budget kill switch wraps the WHOLE script, not just the prune: the box bills
+    by wall clock, and a hung clone, a stuck ``uv sync``, or a 60 GB model download
+    that stalls costs exactly as much as a hung prune. The script re-executes itself
+    under ``timeout`` (guard: ``REAP_LAB_TIMED``) and prints a loud message on 124.
+
+    It deliberately does NOT power the box down: on most rentals a shutdown from
+    inside the guest keeps billing the (still-allocated) instance while destroying
+    the shell you would use to fetch the result. Destroying the instance is step 5
+    of the instructions, and it is the user's call.
     """
     rtag = retention_tag(retention)
     seconds = budget_timeout_seconds(spec)
@@ -273,8 +397,29 @@ def build_remote_script(spec: SweepSpec, retention: float) -> str:
     hours = seconds / 3600
     return f"""#!/usr/bin/env bash
 # reap-lab remote prune -- generated, self-contained. Retention {retention:g} ({rtag}).
-# Budget kill switch: ${remote.budget_usd:g} at ${remote.usd_per_hour:g}/h -> {seconds}s ({hours:.1f}h).
+# Budget kill switch: ${remote.budget_usd:g} at ${remote.usd_per_hour:g}/h -> {seconds}s ({hours:.1f}h)
+# covering the ENTIRE run (clone + build + model download + prune + package).
 set -euo pipefail
+
+# --- budget kill switch: re-exec the whole script under `timeout` -------------
+if [ "${{REAP_LAB_TIMED:-0}}" != "1" ]; then
+  export REAP_LAB_TIMED=1
+  set +e
+  timeout -s TERM -k 60s {seconds}s bash "$0" "$@"
+  code=$?
+  set -e
+  if [ $code -eq 124 ] || [ $code -eq 137 ]; then
+    # single-quoted: a literal '$75' would otherwise expand as the shell variable $7
+    echo '' >&2
+    echo '=====================================================================' >&2
+    echo ' BUDGET KILL SWITCH: {seconds}s ({hours:.1f}h) elapsed -- run TERMINATED.' >&2
+    echo ' That is {remote.budget_usd:g} USD at {remote.usd_per_hour:g} USD/h (prune.remote.budget_usd).' >&2
+    echo ' Nothing was powered off: DESTROY THE INSTANCE YOURSELF to stop billing.' >&2
+    echo ' Then either raise prune.remote.budget_usd or rent a faster 80 GB box.' >&2
+    echo '=====================================================================' >&2
+  fi
+  exit $code
+fi
 
 WORK="${{REAP_WORK:-$HOME/{REMOTE_WORKDIR}}}"
 mkdir -p "$WORK"
@@ -295,7 +440,7 @@ if ! command -v uv >/dev/null 2>&1; then
 fi
 bash scripts/build.sh
 
-echo "== [3/6] pre-download model into the HF cache (HF_TOKEN passthrough)"
+echo "== [3/6] pre-download model into the HF cache (HF_TOKEN read from the environment)"
 export HF_TOKEN="${{HF_TOKEN:-}}"
 uv run hf download {spec.model_id} || uv run huggingface-cli download {spec.model_id}
 
@@ -306,8 +451,8 @@ if [ ! -f "$DATASET/{DATASET_FILENAME}" ]; then
   exit 2
 fi
 
-echo "== [5/6] prune (compression-ratio {format_ratio(retention)}, kill switch {seconds}s)"
-timeout {seconds}s {prune_line}
+echo "== [5/6] prune (compression-ratio {format_ratio(retention)})"
+{prune_line}
 
 echo "== [6/6] package pruned checkpoint"
 OUT=$(find . -type d -name pruned_models | head -n 1)
@@ -331,6 +476,10 @@ class RemoteProfile(ExecutionProfile):
     """
 
     name = "remote"
+    peak_mem_note = (
+        "not measured: the prune ran on the remote GPU box, which this process never "
+        "observes (only the tarball comes back)"
+    )
 
     def __init__(self, work_dir: Path, log_dir: Path | None = None):
         self.work_dir = Path(work_dir)
@@ -389,41 +538,60 @@ class RemoteProfile(ExecutionProfile):
 
         Plain OpenSSH subprocesses (list argv). The remote run gets a timeout
         of the budget kill switch plus margin.
+
+        HF_TOKEN never touches a command line. When set, the run step reads it from
+        stdin (``IFS= read -r HF_TOKEN``) and exports it inside the remote shell, so
+        the secret stays out of: this machine's argv, the on-disk log, any raised
+        error, and the REMOTE box's process table (``ps`` shows the ssh command line
+        of every user).
         """
-        run_cmd = f"bash {REMOTE_WORKDIR}/prune_remote_{rtag}.sh"
+        script_name = f"prune_remote_{rtag}.sh"
         token = os.environ.get("HF_TOKEN")
         if token:
-            run_cmd = f"HF_TOKEN={token} {run_cmd}"
-        steps: list[tuple[list[str], str, float | None]] = [
+            run_cmd = (
+                f"IFS= read -r HF_TOKEN; export HF_TOKEN; bash {REMOTE_WORKDIR}/{script_name}"
+            )
+            run_input = token.strip() + "\n"
+        else:
+            run_cmd = f"bash {REMOTE_WORKDIR}/{script_name}"
+            run_input = None
+        steps: list[tuple[list[str], str, float | None, str | None]] = [
             (
                 ["ssh", host, f"mkdir -p {REMOTE_WORKDIR} && rm -rf {REMOTE_WORKDIR}/dataset"],
                 "prepare remote work dir",
                 300.0,
+                None,
             ),
             (
-                ["scp", str(script_path), f"{host}:{REMOTE_WORKDIR}/prune_remote_{rtag}.sh"],
+                ["scp", str(script_path), f"{host}:{REMOTE_WORKDIR}/{script_name}"],
                 "upload provisioning script",
                 600.0,
+                None,
             ),
             (
                 ["scp", "-r", str(dataset_dir), f"{host}:{REMOTE_WORKDIR}/dataset"],
                 "upload calibration dataset",
                 1800.0,
+                None,
             ),
             (
                 ["ssh", host, run_cmd],
                 "run remote prune",
                 budget_timeout_seconds(spec) + 1800.0,
+                run_input,
             ),
             (
                 ["scp", f"{host}:{REMOTE_WORKDIR}/pruned_{rtag}.tar.gz", str(tar_local)],
                 "download pruned checkpoint tarball",
                 None,
+                None,
             ),
         ]
         log_path = self.log_dir / f"remote-{rtag}.log"
-        for argv, what, timeout in steps:
-            self._ssh_step(argv, what=what, host=host, timeout=timeout, log_path=log_path)
+        for argv, what, timeout, stdin_text in steps:
+            self._ssh_step(
+                argv, what=what, host=host, timeout=timeout, log_path=log_path, stdin_text=stdin_text
+            )
         if not tar_local.exists() or tar_local.stat().st_size == 0:
             raise PruneError(
                 f"Download reported success but {tar_local} is missing or empty.\n"
@@ -439,6 +607,7 @@ class RemoteProfile(ExecutionProfile):
         host: str,
         timeout: float | None,
         log_path: Path,
+        stdin_text: str | None = None,
     ) -> None:
         try:
             result = subprocess.run(  # noqa: S603 - list argv, no shell
@@ -448,6 +617,7 @@ class RemoteProfile(ExecutionProfile):
                 encoding="utf-8",
                 errors="replace",
                 timeout=timeout,
+                input=stdin_text,
             )
         except FileNotFoundError as e:
             raise PrerequisiteError(
@@ -463,18 +633,18 @@ class RemoteProfile(ExecutionProfile):
             ) from e
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with open(log_path, "a", encoding="utf-8", newline="\n") as log:
-            log.write(f"\n$ {' '.join(argv)}\n")
+            log.write(f"\n$ {_display(argv)}\n")
             if getattr(result, "stdout", None):
-                log.write(result.stdout)
+                log.write(redact(result.stdout))
             if getattr(result, "stderr", None):
-                log.write(result.stderr)
+                log.write(redact(result.stderr))
         if result.returncode != 0:
             tail = ((getattr(result, "stderr", "") or "") + (getattr(result, "stdout", "") or ""))[-1500:]
             raise PruneError(
                 f"Remote step failed: {what} (exit {result.returncode}).\n"
-                f"Command: {' '.join(argv)}\n"
+                f"Command: {_display(argv)}\n"
                 f"Verify you can connect manually: ssh {host}\n"
-                f"Output tail:\n{tail}\nFull log: {log_path}"
+                f"Output tail:\n{redact(tail)}\nFull log: {log_path}"
             )
 
     # -- tarball handling ------------------------------------------------------
@@ -514,12 +684,14 @@ class RemoteProfile(ExecutionProfile):
         rtag = retention_tag(retention)
         remote = spec.prune.remote
         seconds = budget_timeout_seconds(spec)
+        script_name = f"prune_remote_{rtag}.sh"
         text = f"""# Remote prune -- manual steps ({rtag}, {spec.model_id})
 
 No `prune.remote.ssh_host` is configured, so run these steps yourself.
-Budget guard: the script kills the prune after {seconds}s
-(= ${remote.budget_usd:g} / ${remote.usd_per_hour:g} per hour). Provider hint: {remote.provider},
-recommended box: {remote.gpu_hint}.
+Budget guard: the script kills ITSELF -- clone, build, model download, prune and
+packaging together -- after {seconds}s (= ${remote.budget_usd:g} / ${remote.usd_per_hour:g} per hour).
+It does not power the box down: destroying the instance (step 5) is what stops billing.
+Provider hint: {remote.provider}, recommended box: {remote.gpu_hint}.
 
 1. Rent a GPU instance (1x 80 GB, e.g. A100/H100) with SSH access.
    Vast.ai / RunPod / Lambda all work; see docs/REMOTE_GPU.md.
@@ -527,12 +699,18 @@ recommended box: {remote.gpu_hint}.
 2. Upload the script and the calibration dataset (replace user@HOST):
 
        ssh user@HOST "mkdir -p {REMOTE_WORKDIR}"
-       scp "{script_path}" user@HOST:{REMOTE_WORKDIR}/prune_remote_{rtag}.sh
+       scp "{script_path}" user@HOST:{REMOTE_WORKDIR}/{script_name}
        scp -r "{dataset_dir}" user@HOST:{REMOTE_WORKDIR}/dataset
 
-3. Run the prune (pass HF_TOKEN if the model is gated):
+3. Run the prune:
 
-       ssh user@HOST "HF_TOKEN=hf_xxx bash {REMOTE_WORKDIR}/prune_remote_{rtag}.sh"
+       ssh user@HOST "bash {REMOTE_WORKDIR}/{script_name}"
+
+   Gated model? Pipe the token in on stdin -- never put it on the command line
+   (it would show up in `ps` on the remote box and in your shell history):
+
+       printf '%s\\n' "$HF_TOKEN" | ssh user@HOST \\
+         "IFS= read -r HF_TOKEN; export HF_TOKEN; bash {REMOTE_WORKDIR}/{script_name}"
 
 4. Download the result to EXACTLY this path:
 

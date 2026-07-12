@@ -47,3 +47,52 @@ def test_provider_cfg_defaults():
     cfg = ProviderCfg(kind="openai-compat")
     assert cfg.temperature == 0.0
     assert cfg.api_key_env is None  # local servers need no key
+
+
+def test_config_hash_tracks_pack_content(tmp_path, example_sweep_path, cpa_pack_path):
+    import shutil
+
+    from reaplab.core.config import SweepSpec as SS
+
+    cfg_dir = tmp_path / "configs"
+    shutil.copytree(example_sweep_path.parent, cfg_dir)
+    spec_path = cfg_dir / example_sweep_path.name
+    h1 = SS.from_yaml(spec_path).config_hash()
+
+    pack = cfg_dir / "domain-packs" / "cpa-firm.yaml"
+    pack.write_text(
+        pack.read_text(encoding="utf-8").replace("weight: 3.0", "weight: 9.0"), encoding="utf-8"
+    )
+    h2 = SS.from_yaml(spec_path).config_hash()
+    assert h1 != h2, "editing pack content must mint a new hash (fresh datasets/artifacts)"
+
+    # comment-only edits don't invalidate completed work
+    pack.write_text("# tuning note\n" + pack.read_text(encoding="utf-8"), encoding="utf-8")
+    assert SS.from_yaml(spec_path).config_hash() == h2
+
+
+def test_config_hash_ignores_gates_and_runtime_plumbing(example_sweep_path):
+    a = SweepSpec.from_yaml(example_sweep_path)
+    b = SweepSpec.from_yaml(example_sweep_path)
+    b.gates.max_vram_gb = 24
+    b.runtime.port = 19999
+    b.runtime.llama_server_path = "C:/tools/llama-server.exe"
+    assert a.config_hash() == b.config_hash()
+    b.runtime.base_url = "http://localhost:5555/v1"  # selects which server answers -> matters
+    assert a.config_hash() != b.config_hash()
+
+
+def test_unknown_yaml_keys_fail_loudly():
+    with pytest.raises(ValueError, match="wieght|extra"):
+        DomainPack.model_validate(
+            {
+                "name": "p",
+                "domains": [{"name": "d", "description": "x", "wieght": 2.0}],
+            }
+        )
+
+
+def test_duplicate_domain_names_rejected():
+    dom = {"name": "d", "description": "x"}
+    with pytest.raises(ValueError, match="duplicate domain name"):
+        DomainPack.model_validate({"name": "p", "domains": [dom, dict(dom)]})

@@ -131,9 +131,11 @@ class ToolCallScorer:
         if not calls:
             return 0.0, False, {"schema_valid": False, "error": "no tool call found in response"}
 
-        best: tuple[float, bool, dict[str, Any]] = (
-            0.0, False, {"schema_valid": False, "called_tool": calls[0]["name"], "error": "unknown tool"}
-        )
+        # Only calls to KNOWN tools produce a real verdict; the unknown-tool detail is a
+        # fallback used when no call named a listed tool. Reporting "unknown tool" for a
+        # known tool whose ARGUMENTS failed validation would send the user hunting for a
+        # naming bug that does not exist.
+        best: tuple[float, bool, dict[str, Any]] | None = None
         for call in calls:
             tool = find_tool(item.tools, call["name"])
             if tool is None:
@@ -145,7 +147,10 @@ class ToolCallScorer:
                 err = None
             except jsonschema.ValidationError as e:
                 valid = False
-                err = str(e).splitlines()[0][:300]
+                err = (
+                    f"arguments for tool {call['name']!r} failed its parameter schema: "
+                    f"{str(e).splitlines()[0]}"
+                )[:300]
             except jsonschema.SchemaError as e:
                 valid = False
                 err = f"tool {call['name']!r} has an invalid parameter schema: {e}".replace("\n", " ")[:300]
@@ -154,9 +159,19 @@ class ToolCallScorer:
                                       "expected_tool": item.expected_tool}
             if err:
                 detail["error"] = err
+                detail["args_invalid"] = True
             if valid and correct_tool:
                 return 1.0, True, detail
             candidate = (0.5, False, detail) if valid else (0.0, False, detail)
-            if candidate[0] > best[0]:
+            if best is None or candidate[0] > best[0]:
                 best = candidate
-        return best
+        if best is not None:
+            return best
+
+        known = ", ".join(sorted(n for n in (tool_name(t) for t in item.tools) if n))
+        return 0.0, False, {
+            "schema_valid": False,
+            "called_tool": calls[0]["name"],
+            "expected_tool": item.expected_tool,
+            "error": f"unknown tool {calls[0]['name']!r}; item {item.id!r} lists: {known}",
+        }

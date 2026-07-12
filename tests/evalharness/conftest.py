@@ -62,7 +62,12 @@ def make_manifest():
         kind: str = "baseline",
         retention: float | None = None,
         quant: str | None = "Q4_K_M",
+        artifact_hash: str | None = "unset",
     ) -> ArtifactManifest:
+        # real manifests always carry the streamed content hash (prune/baseline set it);
+        # resume identity is keyed on it, so the default mirrors production.
+        if artifact_hash == "unset":
+            artifact_hash = f"sha-{artifact_id}"
         return ArtifactManifest(
             artifact_id=artifact_id,
             kind=kind,
@@ -71,6 +76,7 @@ def make_manifest():
             quant=quant,
             path=f"artifacts/{artifact_id}.gguf",
             config_hash="cfg000000000",
+            artifact_hash=artifact_hash,
         )
 
     return _make

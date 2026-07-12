@@ -99,6 +99,31 @@ class TestDiscovery:
         tools = LlamaCppTools.discover()
         assert tools.quantize_bin == d / "llama-quantize.exe"
 
+    def test_binary_in_cwd_is_never_used_implicitly(self, no_llama_tools, monkeypatch, tmp_path: Path):
+        """shutil.which() searches '.' first on Windows: a llama-quantize.exe dropped into
+        the folder you happen to run reap-lab from must NOT be executed."""
+        monkeypatch.chdir(tmp_path)
+        planted = tmp_path / "llama-quantize.exe"
+        planted.touch()
+        (tmp_path / "convert_hf_to_gguf.py").touch()
+        monkeypatch.setattr(
+            gguf.shutil, "which", lambda name: str(tmp_path / name) if (tmp_path / name).exists() else None
+        )
+        with pytest.raises(ToolNotFoundError) as exc:
+            LlamaCppTools.discover()
+        msg = str(exc.value)
+        assert "current directory" in msg
+        assert "CONVERT_HF_TO_GGUF" in msg  # tells the user how to configure it explicitly
+
+    def test_cwd_binary_still_usable_when_configured_explicitly(self, no_llama_tools, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
+        conv = tmp_path / "convert_hf_to_gguf.py"
+        quant = tmp_path / "llama-quantize.exe"
+        conv.touch()
+        quant.touch()
+        tools = LlamaCppTools.discover(convert_script=conv, quantize_bin=quant)
+        assert tools.quantize_bin == quant
+
 
 @pytest.fixture
 def fake_tools(tmp_path: Path) -> LlamaCppTools:

@@ -85,11 +85,24 @@ def test_valid_without_gold_passes_flagged(make_record, rresp):
     assert detail["no_gold"] is True
 
 
-def test_non_json_gold_treated_as_no_gold(make_record, rresp):
+def test_unparseable_gold_scores_validity_only_and_is_flagged(make_record, rresp):
+    """Broken gold is bad DATA. Awarding full credit would hide it behind a perfect
+    score; half credit (schema validity only) keeps it visible in the report."""
     item = _item(make_record, gold="the vendor should be Staples")
     score, passed, detail = scorer.score(item, rresp(GOLD))
-    assert (score, passed) == (1.0, True)
-    assert detail["no_gold"] is True
+    assert (score, passed) == (0.5, False)
+    assert detail["schema_valid"] is True
+    assert detail["gold_unparseable"] is True
+    assert "no_gold" not in detail
+    assert "not valid JSON" in detail["error"] and item.id in detail["error"]
+
+
+def test_unparseable_gold_does_not_rescue_an_invalid_response(make_record, rresp):
+    item = _item(make_record, gold="not json at all")
+    resp = json.dumps({"vendor": "Staples"})  # missing required "amount"
+    score, passed, detail = scorer.score(item, rresp(resp))
+    assert (score, passed) == (0.0, False)
+    assert detail["schema_valid"] is False
 
 
 def test_missing_schema_is_dataset_error(make_record, rresp):

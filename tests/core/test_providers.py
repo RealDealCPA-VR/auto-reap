@@ -96,3 +96,9 @@ def test_anthropic_requires_key(monkeypatch):
     p = get_provider(ProviderCfg(kind="anthropic-api"))
     with pytest.raises(ProviderError, match="ANTHROPIC_API_KEY"):
         p.complete("hi")
+
+
+def test_extract_json_prefers_earliest_value():
+    # prose containing '{' inside the array must not shadow the enclosing array
+    text = 'Here are your items:\n[{"id": 1}, {"id": 2}]\nAnything else?'
+    assert extract_json(text) == [{"id": 1}, {"id": 2}]

@@ -69,6 +69,7 @@ class ItemResult(BaseModel):
 
     item_id: str
     artifact_id: str
+    artifact_hash: str | None = None  # ties resumed rows to the exact GGUF content
     domain: str
     task_type: TaskType
     response: str

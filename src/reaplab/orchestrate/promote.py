@@ -9,6 +9,7 @@ by *moving* them into ``workspace.archive``; nothing is ever deleted.
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
 import shutil
@@ -57,21 +58,58 @@ def _free_bytes(path: Path) -> int:
     return shutil.disk_usage(probe).free
 
 
-def _archive_losers(workspace: Workspace, winner_src: Path) -> int:
-    """Move every non-winner GGUF from workspace.artifacts into
-    workspace.archive (move, never delete). Returns the count moved."""
-    workspace.archive.mkdir(parents=True, exist_ok=True)
+def split_command(command: str, windows: bool | None = None) -> list[str]:
+    """Split a smoke command into argv, correctly on Windows AND POSIX.
+
+    ``shlex.split`` in its default POSIX mode treats ``\\`` as an escape, so a
+    Windows path (``C:\\tools\\smoke.exe``) comes out as ``C:toolssmoke.exe`` and
+    the command can never be found. Windows therefore splits with
+    ``posix=False`` — which keeps quote characters *inside* the tokens
+    (``"C:\\Program Files\\smoke.exe"`` stays quoted and would still fail
+    ``subprocess.run``), so one surrounding pair of matching quotes is stripped
+    from each token afterwards.
+
+    Placeholder substitution ({model}/{path}) happens AFTER splitting, so a
+    substituted path containing spaces stays a single argv token.
+    """
+    if windows is None:
+        windows = os.name == "nt"
+    tokens = shlex.split(command, posix=not windows)
+    if not windows:
+        return tokens
+    stripped: list[str] = []
+    for token in tokens:
+        if len(token) >= 2 and token[0] in ('"', "'") and token[-1] == token[0]:
+            token = token[1:-1]
+        stripped.append(token)
+    return stripped
+
+
+def _archive_losers(
+    workspace: Workspace, winner_src: Path, losers: list[ArtifactManifest]
+) -> int:
+    """Move exactly the given loser artifacts into workspace.archive (move, never
+    delete). Returns the count moved.
+
+    Only artifacts that were EVALUATED and lost are ever passed in by the
+    orchestrator — never a never-evaluated build, never a bf16 intermediate,
+    never a baseline. Archiving by globbing the artifacts tree (the old
+    behavior) permanently stranded candidates a partially-completed grid still
+    needed, so this function does no discovery of its own.
+    """
     winner = winner_src.resolve()
     moved = 0
-    for gguf in sorted(workspace.artifacts.rglob("*.gguf")):
-        if gguf.resolve() == winner:
+    for manifest in losers:
+        src = Path(manifest.path)
+        if not src.is_file() or src.resolve() == winner:
             continue
-        target = workspace.archive / gguf.name
+        workspace.archive.mkdir(parents=True, exist_ok=True)
+        target = workspace.archive / src.name
         counter = 1
         while target.exists():
-            target = workspace.archive / f"{gguf.stem}-{counter}{gguf.suffix}"
+            target = workspace.archive / f"{src.stem}-{counter}{src.suffix}"
             counter += 1
-        shutil.move(str(gguf), str(target))
+        shutil.move(str(src), str(target))
         moved += 1
     return moved
 
@@ -140,6 +178,7 @@ def promote_winner(
     *,
     gates: list[GateResult] | None = None,
     rationale: str = "",
+    losers: list[ArtifactManifest] | None = None,
 ) -> PromotionResult:
     """Promote a winning GGUF into LM Studio and record the decision.
 
@@ -150,15 +189,19 @@ def promote_winner(
       2. disk — verify free space >= the GGUF size before copying.
       3. copy — shutil.copy2 (the source stays in workspace.artifacts).
       4. smoke — run ``spec.promote.smoke_command`` if set. The command is
-         shlex-split first, then ``{model}`` (publisher/model-name key) and
-         ``{path}`` (destination GGUF) are substituted per token, so Windows
-         paths survive intact. Non-zero exit => ok=False, stage="smoke", and
-         losers are NOT archived.
+         split platform-correctly (see :func:`split_command`), then ``{model}``
+         (publisher/model-name key) and ``{path}`` (destination GGUF) are
+         substituted per token, so Windows paths survive intact. Non-zero exit
+         => ok=False, stage="smoke", and losers are NOT archived.
       5. decision page — markdown with the gates table, rationale, artifact
          hash, report reference, and smoke outcome (written even on smoke
          failure, so there is always a record).
-      6. archive — move loser GGUFs to workspace.archive only when
-         ``spec.promote.archive_losers`` and the smoke test passed.
+      6. archive — move exactly the ``losers`` manifests (the EVALUATED
+         non-winner candidates the caller passes in) into workspace.archive,
+         only when ``spec.promote.archive_losers`` and the smoke test passed.
+         With ``losers=None`` nothing is archived: promotion never goes looking
+         for files to move, so a never-evaluated candidate the grid still needs
+         can't be stranded.
 
     Nothing is ever deleted; losers are moved, the winner is copied.
     """
@@ -216,7 +259,7 @@ def promote_winner(
     if spec.promote.smoke_command:
         model_key = f"{publisher}/{model_name}"
         try:
-            tokens = shlex.split(spec.promote.smoke_command)
+            tokens = split_command(spec.promote.smoke_command)
         except ValueError as e:
             smoke_ok = False
             smoke_status = f"FAILED — could not parse smoke_command: {e}"
@@ -270,8 +313,8 @@ def promote_winner(
         )
 
     archived = 0
-    if spec.promote.archive_losers:
-        archived = _archive_losers(workspace, src)
+    if spec.promote.archive_losers and losers:
+        archived = _archive_losers(workspace, src, losers)
 
     message = f"Promoted {manifest.artifact_id} to {dest}."
     if spec.promote.smoke_command:

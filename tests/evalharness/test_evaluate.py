@@ -24,11 +24,17 @@ JSON_SCHEMA = {
 
 
 class CountingMockRunner(MockRunner):
-    """Counts scoring completions (record is not None) separately from perf probes."""
+    """Counts scoring completions (record is not None) separately from perf probes,
+    and records the context each start() ran at."""
 
     def __init__(self) -> None:
         super().__init__()
         self.scoring_calls = 0
+        self.started_contexts: list[int] = []
+
+    def start(self, manifest, context):
+        self.started_contexts.append(context)
+        return super().start(manifest, context)
 
     def complete(self, prompt, *, tools=None, max_tokens, temperature=0.0, record=None):
         if record is not None:
@@ -143,7 +149,10 @@ def test_baseline_open_ended_anchored_candidate_uses_judge(env, make_manifest):
     assert cand_oe and all(r.scorer == "judge" for r in cand_oe)
     # scripted judge: votes A/A/A with swaps -> win/loss/win -> majority win -> 1.0
     assert all(r.score == 1.0 and r.passed for r in cand_oe)
-    assert list((ws.judge_cache).glob("*.json"))  # judgments cached on disk
+    # judgments cached per SWEEP (contract C5), not in one workspace-global bucket
+    cache_dir = ws.judge_cache / spec.config_hash()
+    assert list(cache_dir.glob("*.json"))
+    assert not list(ws.judge_cache.glob("*.json"))
 
 
 def test_candidate_without_baseline_responses_stays_heuristic(env, make_manifest):
@@ -172,6 +181,134 @@ def test_empty_eval_set_is_instructive_error(env, make_manifest):
     spec, ws, state, _ = env
     with pytest.raises(ValueError, match="empty eval set"):
         evaluate_artifact(spec, make_manifest(), [], ws, state)
+
+
+# -- FR-1.4: long-context items must fit -> score at max(contexts) ---------------
+
+
+def test_scoring_runs_at_max_context_and_perf_walks_down(env, make_manifest):
+    spec, ws, state, records = env  # contexts [2048, 4096]
+    runner = CountingMockRunner()
+    summary = evaluate_artifact(spec, make_manifest(), records, ws, state, runner=runner)
+    # scoring server comes up at the LARGEST context (16k+ eval items must fit), and
+    # perf then walks down, so the scoring server serves the first perf point: one
+    # start per context, no extra restart.
+    assert runner.started_contexts == [4096, 2048]
+    assert set(summary["perf"]) == {"2048", "4096"}
+
+
+# -- contract C5: resume identity is the artifact HASH, not the id ----------------
+
+
+def _rows(ws, spec, artifact_id=None):
+    rows = read_jsonl(ws.results_jsonl(spec.config_hash()), ItemResult)
+    return [r for r in rows if artifact_id is None or r.artifact_id == artifact_id]
+
+
+def test_new_rows_carry_the_artifact_hash(env, make_manifest):
+    spec, ws, state, records = env
+    manifest = make_manifest()
+    evaluate_artifact(spec, manifest, records, ws, state)
+    assert all(r.artifact_hash == manifest.artifact_hash for r in _rows(ws, spec))
+
+
+def test_rebuilt_gguf_same_id_is_rescored_not_resumed(env, make_manifest):
+    spec, ws, state, records = env
+    first = make_manifest(artifact_id="r0.5-q4_k_m", kind="gguf", retention=0.5,
+                          artifact_hash="sha-old")
+    evaluate_artifact(spec, first, records, ws, state, runner=CountingMockRunner())
+
+    rebuilt = make_manifest(artifact_id="r0.5-q4_k_m", kind="gguf", retention=0.5,
+                            artifact_hash="sha-new")  # same id, different bytes
+    runner = CountingMockRunner()
+    evaluate_artifact(spec, rebuilt, records, ws, state, runner=runner)
+    assert runner.scoring_calls == len(records)  # nothing stale was reused
+
+    rows = _rows(ws, spec, "r0.5-q4_k_m")
+    assert len(rows) == len(records)  # stale rows rewritten away, not duplicated
+    assert {r.artifact_hash for r in rows} == {"sha-new"}
+
+
+def test_manifest_without_hash_never_resumes(env, make_manifest):
+    spec, ws, state, records = env
+    manifest = make_manifest(artifact_hash=None)
+    evaluate_artifact(spec, manifest, records, ws, state)
+    runner = CountingMockRunner()
+    evaluate_artifact(spec, manifest, records, ws, state, runner=runner)
+    assert runner.scoring_calls == len(records)  # unverifiable identity: re-score
+    assert len(_rows(ws, spec, manifest.artifact_id)) == len(records)  # still no duplicates
+
+
+def test_resume_false_rescores_only_this_artifact(env, make_manifest):
+    spec, ws, state, records = env
+    base = make_manifest()
+    cand = make_manifest(artifact_id="r0.75-q4_k_m", kind="gguf", retention=0.75)
+    evaluate_artifact(spec, base, records, ws, state)
+    evaluate_artifact(spec, cand, records, ws, state)
+    base_before = {(r.item_id, r.response) for r in _rows(ws, spec, base.artifact_id)}
+
+    runner = CountingMockRunner()
+    evaluate_artifact(spec, cand, records, ws, state, runner=runner, resume=False)
+    assert runner.scoring_calls == len(records)  # every item re-scored
+
+    assert len(_rows(ws, spec, cand.artifact_id)) == len(records)  # rewritten, not appended
+    assert {(r.item_id, r.response) for r in _rows(ws, spec, base.artifact_id)} == base_before
+    assert len(_rows(ws, spec)) == 2 * len(records)
+
+
+def test_resume_true_still_skips_when_hash_matches(env, make_manifest):
+    spec, ws, state, records = env
+    manifest = make_manifest()
+    evaluate_artifact(spec, manifest, records, ws, state)
+    runner = CountingMockRunner()
+    s = evaluate_artifact(spec, manifest, records, ws, state, runner=runner, resume=True)
+    assert runner.scoring_calls == 0
+    assert s["items_scored"] == len(records)
+
+
+# -- [19]: open-ended scales must not be mixed across a resume -------------------
+
+
+def test_resume_rescores_open_ended_when_scoring_mode_changed(env, make_manifest):
+    spec, ws, state, records = env
+    base_summary = evaluate_artifact(spec, make_manifest(), records, ws, state)
+    cand = make_manifest(artifact_id="r0.75-q4_k_m", kind="gguf", retention=0.75)
+
+    # first pass: no baseline responses yet -> open-ended items scored heuristically (0.75)
+    evaluate_artifact(spec, cand, records, ws, state, baseline_responses=None)
+    oe = [r for r in _rows(ws, spec, cand.artifact_id) if r.task_type == TaskType.OPEN_ENDED]
+    assert oe and all(r.scorer == "open_ended_heuristic" for r in oe)
+
+    # second pass: the baseline is available -> judge mode. The heuristic rows live on a
+    # different scale (0.75 vs. win-rate), so they must be RE-SCORED, not resumed.
+    runner = CountingMockRunner()
+    evaluate_artifact(
+        spec, cand, records, ws, state, runner=runner,
+        baseline_responses=base_summary["responses"],
+    )
+    n_oe = sum(1 for r in records if r.task_type == TaskType.OPEN_ENDED)
+    assert runner.scoring_calls == n_oe  # only the open-ended items were re-run
+
+    rows = _rows(ws, spec, cand.artifact_id)
+    assert len(rows) == len(records)  # the heuristic rows were rewritten away
+    oe = [r for r in rows if r.task_type == TaskType.OPEN_ENDED]
+    assert all(r.scorer == "judge" for r in oe)
+    assert all(r.score == 1.0 for r in oe)
+
+
+def test_baseline_anchor_rows_are_never_reused_as_judge_rows(env, make_manifest):
+    """The baseline's anchored 0.5 rows belong to the baseline alone; a candidate that
+    reuses the same artifact_hash must still be judged."""
+    spec, ws, state, records = env
+    base = make_manifest(artifact_hash="sha-shared")
+    evaluate_artifact(spec, base, records, ws, state)
+    responses = {r.item_id: r.response for r in _rows(ws, spec, base.artifact_id)}
+
+    cand = make_manifest(artifact_id="r0.75-q4_k_m", kind="gguf", retention=0.75,
+                         artifact_hash="sha-shared")
+    evaluate_artifact(spec, cand, records, ws, state, baseline_responses=responses)
+    oe = [r for r in _rows(ws, spec, cand.artifact_id) if r.task_type == TaskType.OPEN_ENDED]
+    assert oe and all(r.scorer == "judge" for r in oe)
 
 
 def test_pruned_scores_below_baseline_end_to_end(env, make_manifest, make_record, demo_tools):

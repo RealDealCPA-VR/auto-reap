@@ -138,6 +138,31 @@ def _chat_completion(
     )
 
 
+def _served_model_names(resp: Any) -> list[str]:
+    """Model names from a GET /models body ({"data": [{"id": ...}, ...]}).
+
+    Returns [] when the body cannot be parsed or lists nothing — "cannot enumerate"
+    is deliberately distinct from "does not serve it", so callers can skip
+    verification instead of failing on a server with a non-standard shape.
+    """
+    try:
+        data = resp.json()
+    except Exception:  # noqa: BLE001 - any non-JSON body means "cannot enumerate"
+        return []
+    entries = data.get("data") if isinstance(data, dict) else data
+    if not isinstance(entries, list):
+        return []
+    names: list[str] = []
+    for e in entries:
+        if isinstance(e, str):
+            names.append(e)
+        elif isinstance(e, dict):
+            name = e.get("id") or e.get("name") or e.get("model")
+            if isinstance(name, str):
+                names.append(name)
+    return names
+
+
 # ---------------------------------------------------------------------------
 # OpenAICompatRunner
 # ---------------------------------------------------------------------------
@@ -153,15 +178,25 @@ class OpenAICompatRunner(ModelRunner):
 
     def __init__(self, cfg: RuntimeCfg | None = None, *, model: str | None = None, timeout_s: float = 300.0):
         self.cfg = cfg or RuntimeCfg(kind="openai-compat")
-        self.model = model
+        # runtime.model names the model SERVER-SIDE (LM Studio/Ollama ids look nothing
+        # like our artifact ids); the artifact id is only a last-resort fallback.
+        self.model = model if model is not None else self.cfg.model
         self.timeout_s = timeout_s
         self.load_time_s = None
         self.peak_vram_mb = None
         self._manifest: ArtifactManifest | None = None
+        self.served_models: list[str] = []
 
     @property
     def base_url(self) -> str:
         return (self.cfg.base_url or "http://localhost:1234/v1").rstrip("/")
+
+    def requested_model(self, manifest: ArtifactManifest | None = None) -> str:
+        """The name sent as the OpenAI `model` field: runtime.model, else the artifact id."""
+        manifest = manifest or self._manifest
+        if self.model:
+            return self.model
+        return manifest.artifact_id if manifest else "default"
 
     def start(self, manifest: ArtifactManifest, context: int) -> None:
         self._manifest = manifest
@@ -176,6 +211,21 @@ class OpenAICompatRunner(ModelRunner):
                 f"for artifact {manifest.artifact_id!r}, or set runtime.kind to "
                 "'llama-server' so reap-lab launches it for you."
             ) from e
+        self.served_models = _served_model_names(resp)
+        wanted = self.requested_model(manifest)
+        # Only enforce when the server actually enumerates its models: some
+        # OpenAI-compatible servers answer /models with an empty or non-standard
+        # body, and a runner must not refuse to evaluate on that alone.
+        if self.served_models and wanted not in self.served_models:
+            served = ", ".join(repr(m) for m in self.served_models[:10])
+            raise RunnerError(
+                f"the server at {self.base_url} does not serve a model named {wanted!r} "
+                f"(it serves: {served}). Set runtime.model in your sweep YAML to one of "
+                "those names — reap-lab cannot load a GGUF into a server it did not "
+                f"launch, so the artifact {manifest.artifact_id!r} must already be loaded "
+                "there. Use runtime.kind: llama-server to have reap-lab launch the "
+                "artifact itself."
+            )
 
     def stop(self) -> None:  # nothing was launched; nothing to tear down
         return None
@@ -190,10 +240,9 @@ class OpenAICompatRunner(ModelRunner):
         record: EvalRecord | None = None,
     ) -> RunnerResponse:
         del record  # real runners never see gold data
-        model = self.model or (self._manifest.artifact_id if self._manifest else "default")
         return _chat_completion(
             self.base_url,
-            model=model,
+            model=self.requested_model(),
             prompt=prompt,
             tools=tools,
             max_tokens=max_tokens,
@@ -248,6 +297,10 @@ class LlamaServerRunner(ModelRunner):
     it down Windows-safely (terminate -> kill). Peak VRAM comes from a background
     nvidia-smi poll; boxes without nvidia-smi simply report None.
 
+    peak_vram_mb is a LIVE property: perf capture snapshots it while the server is
+    still running (PRD FR-3.4 / the §5 VRAM blocker gate), so it must reflect the
+    poller's running peak, not only what stop() harvested.
+
     Injection points (popen_factory / http_get / sleep) exist so tests never touch
     a real process or socket.
     """
@@ -272,7 +325,24 @@ class LlamaServerRunner(ModelRunner):
         self._proc: Any | None = None
         self._poller: _VramPoller | None = None
         self.load_time_s = None
-        self.peak_vram_mb = None
+        self._peak_vram_mb: float | None = None
+
+    @property
+    def peak_vram_mb(self) -> float | None:
+        """Peak VRAM (MB) for the CURRENT server run — live while it runs.
+
+        While a poller is alive this returns its running peak, so a PerfMetrics
+        snapshot taken mid-run (perf.py, called before stop()) carries a real
+        number instead of None. stop() folds the final poller peak into the stored
+        value, so the reading survives teardown; start() resets it, because each
+        context gets its own server and its own peak.
+        """
+        poller = self._poller
+        live = poller.peak if poller is not None else None
+        stored = self._peak_vram_mb
+        if live is None:
+            return stored
+        return live if stored is None else max(stored, live)
 
     @property
     def base_url(self) -> str:
@@ -318,6 +388,18 @@ class LlamaServerRunner(ModelRunner):
     def start(self, manifest: ArtifactManifest, context: int) -> None:
         self.stop()  # idempotent: never leak a previous server
         cmd = self.build_command(manifest, context)
+        if self._ready():
+            # Something ELSE is on this port. Adopting it would silently evaluate a
+            # foreign model (or a stale llama-server holding a different GGUF) and
+            # report the scores as this artifact's.
+            raise RunnerError(
+                f"port {self.cfg.port} is already serving HTTP, so llama-server was not "
+                f"launched for artifact {manifest.artifact_id!r} — reap-lab refuses to "
+                "score a model it did not load. Stop whatever is listening (a previous "
+                "run, LM Studio, another sweep), or set runtime.port to a free port. If "
+                "that server is deliberately hosting the model, use runtime.kind: "
+                f"openai-compat with base_url http://127.0.0.1:{self.cfg.port}/v1 instead."
+            )
         t0 = time.monotonic()
         try:
             self._proc = self._popen_factory(
@@ -347,15 +429,19 @@ class LlamaServerRunner(ModelRunner):
                 )
             self._sleep(self.POLL_INTERVAL_S)
         self.load_time_s = time.monotonic() - t0
-        self.peak_vram_mb = None
+        self._peak_vram_mb = None  # fresh server, fresh peak
         self._poller = _VramPoller(run_cmd=self._vram_poll_cmd)
         self._poller.start()
 
     def stop(self) -> None:
         if self._poller is not None:
-            self._poller.stop()
-            self._poller.join(timeout=5)
-            self.peak_vram_mb = self._poller.peak
+            poller = self._poller
+            poller.stop()
+            poller.join(timeout=5)
+            final = poller.peak
+            if final is not None:
+                stored = self._peak_vram_mb
+                self._peak_vram_mb = final if stored is None else max(stored, final)
             self._poller = None
         if self._proc is not None:
             proc = self._proc
@@ -634,7 +720,7 @@ def runner_from_runtime(cfg: RuntimeCfg) -> ModelRunner:
     if cfg.kind == "mock":
         return MockRunner()
     if cfg.kind == "openai-compat":
-        return OpenAICompatRunner(cfg)
+        return OpenAICompatRunner(cfg, model=cfg.model)
     if cfg.kind == "llama-server":
         return LlamaServerRunner(cfg)
     raise RunnerError(f"unknown runtime.kind {cfg.kind!r}; expected mock | openai-compat | llama-server")

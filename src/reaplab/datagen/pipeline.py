@@ -1,14 +1,22 @@
 """Top-level dataset generation pipeline (C1): plan -> generate -> filter -> emit.
 
-``generate_datasets`` is the single entry point the orchestrator calls. It writes:
+``generate_datasets`` is the single entry point the orchestrator calls. Datasets are
+PER-SWEEP: everything lands in ``workspace.data_dir(spec.config_hash())`` —
+``runs/<config_hash>/data/`` — next to that sweep's state.db and results.jsonl:
 
-- ``workspace.data / "calibration_v1.jsonl"``      (CalibrationRecord lines, prompts only)
-- ``workspace.data / "eval_v1.jsonl"``             (EvalRecord lines, held out + refusal suites)
-- ``workspace.data / "dedup_report_v1.json"``      (what the near-dup/leakage filter dropped)
-- ``workspace.data / "eval_v1_audit_sample.md"``   (stratified ~5% human-audit sample, PRD M1)
+- ``calibration_v1.jsonl``      (CalibrationRecord lines, prompts only)
+- ``eval_v1.jsonl``             (EvalRecord lines, held out + refusal suites)
+- ``dedup_report_v1.json``      (what the near-dup/leakage filter dropped)
+- ``eval_v1_audit_sample.md``   (stratified ~5% human-audit sample, PRD M1)
 
-Resumability: with a StateDB, a completed "datagen" stage with both files present
-short-circuits and returns the existing paths (PRD FR-4.1/G3).
+Two sweeps sharing one workspace therefore never overwrite each other's data, and a
+resumed sweep always reads exactly the eval set it was scored against.
+
+Resumability is content-addressed, not state-addressed: when both JSONL files already
+exist for this config hash they are returned immediately, with or without a StateDB.
+The hash covers everything datagen depends on (pack CONTENT, sizes, seed, generator),
+so "same hash" means "same datasets" — regenerating would only churn the audited files
+(PRD FR-4.1/G3, PRD M1).
 """
 
 from __future__ import annotations
@@ -50,6 +58,32 @@ def _stage_done(state: StateDB) -> bool:
     """True when any 'datagen' job is done — tolerant of the key another
     component may have used when marking the stage."""
     return any(j["status"] == "done" for j in state.jobs(STAGE))
+
+
+def dataset_dir(spec: SweepSpec, workspace: Workspace) -> Path:
+    """The per-sweep dataset folder: ``runs/<config_hash>/data`` (contract C1)."""
+    return workspace.data_dir(spec.config_hash())
+
+
+def dataset_paths(spec: SweepSpec, workspace: Workspace) -> tuple[Path, Path]:
+    """(calibration_path, eval_path) for this spec — whether or not they exist yet."""
+    d = dataset_dir(spec, workspace)
+    return d / CALIBRATION_FILENAME, d / EVAL_FILENAME
+
+
+def audit_sample_path(spec: SweepSpec, workspace: Workspace) -> Path:
+    """The stratified human-audit sample for this spec's eval set (PRD M1)."""
+    return dataset_dir(spec, workspace) / AUDIT_SAMPLE_FILENAME
+
+
+def dedup_report_path(spec: SweepSpec, workspace: Workspace) -> Path:
+    """The near-dup/leakage filter report for this spec's eval set (PRD FR-1.3)."""
+    return dataset_dir(spec, workspace) / DEDUP_REPORT_FILENAME
+
+
+def _count_lines(path: Path) -> int:
+    with open(path, encoding="utf-8") as f:
+        return sum(1 for line in f if line.strip())
 
 
 def _difficulty(value: Any) -> Difficulty:
@@ -170,25 +204,48 @@ def generate_datasets(
     """Generate (or resume) the calibration and eval datasets for one sweep.
 
     Behavior:
+    - outputs are keyed by ``spec.config_hash()`` and land in
+      ``workspace.data_dir(config_hash)``; a second spec in the same workspace
+      cannot overwrite them (contract C1).
+    - REUSE IS UNCONDITIONAL: if both JSONL files already exist for this hash they
+      are returned as-is, with or without a StateDB. The hash covers the pack
+      content, sizes, seed and generator, so regenerating could only replace the
+      audited dataset with an identical-by-construction (or, for a live provider,
+      *different*) one — neither is wanted mid-sweep.
     - provider defaults to ``get_provider(spec.generator)``; when its cfg.kind is
       "mock" the datasets are synthesized procedurally (deterministic, offline)
       instead of round-tripping through provider text.
     - ``spec.calibration`` / ``spec.eval`` may point at pre-existing JSONL files;
       those are validated, still passed through the leakage filter, and re-emitted
-      into the workspace so downstream stages always read one canonical location.
+      into the run's data dir so downstream stages read one canonical location.
     - eval always receives near-dup + leakage filtering (PRD FR-1.3), a dedup
       report JSON, and a stratified human-audit markdown sample (PRD M1).
-    - with a StateDB: stage "datagen" is marked running/done/failed; a done stage
-      with both output files present returns immediately (resume).
+    - with a StateDB: stage "datagen" is marked running/done/failed (reuse marks it
+      done too, so a fresh state DB over an existing data dir resumes cleanly).
 
-    Returns (calibration_path, eval_path) under ``workspace.data``.
+    Returns (calibration_path, eval_path) under ``workspace.data_dir(config_hash)``.
     """
-    workspace.ensure()
-    cal_path = workspace.data / CALIBRATION_FILENAME
-    eval_path = workspace.data / EVAL_FILENAME
+    config_hash = spec.config_hash()
+    workspace.ensure(config_hash)
+    cal_path, eval_path = dataset_paths(spec, workspace)
 
-    if state is not None and cal_path.exists() and eval_path.exists() and _stage_done(state):
-        log.info("datagen already complete; reusing %s and %s", cal_path, eval_path)
+    if cal_path.exists() and eval_path.exists():
+        log.info("datagen: reusing existing datasets for config %s: %s, %s",
+                 config_hash, cal_path, eval_path)
+        if state is not None and not _stage_done(state):
+            # a new state DB over an existing data dir (e.g. the DB was deleted, or
+            # `generate` ran before `sweep`): record the stage so downstream resume works
+            state.mark_done(
+                STAGE,
+                STAGE_KEY,
+                meta={
+                    "calibration": str(cal_path),
+                    "eval": str(eval_path),
+                    "calibration_count": _count_lines(cal_path),
+                    "eval_count": _count_lines(eval_path),
+                    "reused": True,
+                },
+            )
         return cal_path, eval_path
 
     if provider is None:
@@ -249,14 +306,15 @@ def generate_datasets(
                 "dedup filter dropped %d of %d eval items (%s backend, threshold %.2f)",
                 len(report.dropped), report.eval_in, report.backend, report.threshold,
             )
-        report_path = workspace.data / DEDUP_REPORT_FILENAME
+        report_path = dedup_report_path(spec, workspace)
+        report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(report.model_dump_json(indent=2), encoding="utf-8", newline="\n")
 
         # --- emit ---------------------------------------------------------------
         n_cal = write_jsonl(cal_path, cal_records)
         n_eval = write_jsonl(eval_path, kept_eval)
         audit_path = write_audit_sample(
-            kept_eval, workspace.data / AUDIT_SAMPLE_FILENAME, seed=seed
+            kept_eval, audit_sample_path(spec, workspace), seed=seed
         )
         log.info(
             "datasets written: %s (%d), %s (%d); audit sample: %s",
@@ -276,6 +334,7 @@ def generate_datasets(
                     "seed": seed,
                     "pack": pack.name,
                     "source": source,
+                    "config_hash": config_hash,
                 },
             )
     except Exception as e:

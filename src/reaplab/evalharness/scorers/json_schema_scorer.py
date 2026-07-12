@@ -3,8 +3,12 @@
 Scoring ladder:
   invalid / unparseable ............ 0.0, failed
   schema-valid, gold mismatch ...... 0.5, failed  (validity alone is half credit)
+  schema-valid, gold UNPARSEABLE ... 0.5, failed  (detail flags "gold_unparseable":
+                                     the item's gold is broken, so the response cannot
+                                     earn full credit against it — the bad data must
+                                     show up in the report, not vanish into a 1.0)
   schema-valid + gold match ........ 1.0, passed
-  schema-valid, no comparable gold . 1.0, passed  (detail flags "no_gold")
+  schema-valid, no gold ............ 1.0, passed  (detail flags "no_gold")
 
 Gold comparison is structural equality on the schema's *required* fields only —
 optional fields may legitimately vary.
@@ -48,7 +52,16 @@ class JsonSchemaScorer:
             try:
                 gold_obj = json.loads(item.gold)
             except json.JSONDecodeError:
-                gold_obj = None
+                # Bad gold DATA, not a bad response: awarding full credit here would
+                # hide a broken eval item behind a perfect score. Half credit (validity
+                # only, same tier as a gold mismatch) keeps the item visible.
+                return 0.5, False, {
+                    "schema_valid": True,
+                    "gold_unparseable": True,
+                    "error": f"eval item {item.id!r} has a gold value that is not valid JSON "
+                             f"({item.gold[:80]!r}); scored on schema validity only. Fix the "
+                             "eval dataset (gold for json_schema items must be a JSON document).",
+                }
         if gold_obj is None:
             return 1.0, True, {"schema_valid": True, "no_gold": True}
 

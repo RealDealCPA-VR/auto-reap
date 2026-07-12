@@ -5,6 +5,10 @@ Public API:
 - ``generate_datasets(spec, workspace, provider=None, state=None)`` — the whole
   pipeline: plan -> generate (procedural for mock, batched LLM otherwise) ->
   near-dup/leakage filter -> JSONL emit + dedup report + human-audit sample.
+  Datasets are per-sweep: they live under ``workspace.data_dir(config_hash)`` and
+  are reused as-is whenever both files already exist there (contract C1).
+- ``dataset_paths(spec, workspace)`` / ``audit_sample_path(spec, workspace)`` /
+  ``dedup_report_path(spec, workspace)`` — where those files are, without generating.
 - ``plan_counts(pack, data, seed=...)`` — the per-domain allocation plan.
 - ``filter_near_duplicates(...)`` — the FR-1.3 filter, usable standalone.
 - ``write_audit_sample(...)`` — the PRD M1 stratified review sample.
@@ -19,6 +23,10 @@ from reaplab.datagen.pipeline import (
     CALIBRATION_FILENAME,
     DEDUP_REPORT_FILENAME,
     EVAL_FILENAME,
+    audit_sample_path,
+    dataset_dir,
+    dataset_paths,
+    dedup_report_path,
     generate_datasets,
 )
 from reaplab.datagen.planning import (
@@ -44,8 +52,12 @@ __all__ = [
     "GenerationPlan",
     "SHOULD_REFUSE_COUNT",
     "SHOULD_REFUSE_DOMAIN",
+    "audit_sample_path",
     "benign_suite_size",
     "comparable_text",
+    "dataset_dir",
+    "dataset_paths",
+    "dedup_report_path",
     "estimate_tokens",
     "filter_near_duplicates",
     "generate_datasets",

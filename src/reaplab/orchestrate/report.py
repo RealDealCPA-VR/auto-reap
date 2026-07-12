@@ -3,9 +3,9 @@
 Plain markdown only — the report must render cleanly both in a terminal
 (`rich.markdown` / plain cat) and on GitHub, so no HTML, no images.
 
-Sections: header, ranked table, winner callout, per-domain breakdown,
-Pareto front, regression diff vs baseline, anomalies, failed configs,
-promotion command footer.
+Sections: header, ranked table, winner callout, notes, per-domain breakdown,
+Pareto front, regression diff vs baseline, anomalies, failed configs, manual
+steps pending, promotion command footer.
 """
 
 from __future__ import annotations
@@ -39,6 +39,9 @@ class ArtifactRow(BaseModel):
     false_refusal_rate: float | None = None
     baseline_false_refusal_rate: float | None = None
     is_baseline: bool = False
+    #: Caveats that qualify this row's numbers (e.g. "no matching-quant baseline"),
+    #: surfaced verbatim in the report's Notes section.
+    notes: list[str] = Field(default_factory=list)
 
     @property
     def gates_pass(self) -> bool:
@@ -74,6 +77,7 @@ def render_report(
     rows: list[ArtifactRow],
     winner_id: str | None,
     failed_jobs: list[dict[str, Any]] | None = None,
+    manual_steps: list[dict[str, Any]] | None = None,
 ) -> str:
     """Render the full sweep report as a markdown string.
 
@@ -85,6 +89,9 @@ def render_report(
         winner_id: artifact_id chosen by select_winner, or None.
         failed_jobs: StateDB job dicts with status == "failed"
             (keys: stage, key, error) for the failed-configs section.
+        manual_steps: stages waiting on a human action (keys: stage, key,
+            instructions) — e.g. a remote prune whose script must be run by
+            hand. Rendered as "Manual steps pending"; these are NOT failures.
     """
     gates_cfg = spec.gates
     ranked = sorted(rows, key=lambda r: r.weighted, reverse=True)
@@ -133,6 +140,14 @@ def render_report(
             "Consider a higher retention ratio, a gentler quant, or reviewing the "
             "failed gates in the table above."
         )
+
+    # Row notes (caveats that qualify the numbers above) -----------------------
+    noted = [r for r in ranked if r.notes]
+    if noted:
+        lines += ["", "## Notes", ""]
+        for row in noted:
+            for note in row.notes:
+                lines.append(f"- `{row.artifact_id}`: {note}")
 
     # Per-domain breakdown ---------------------------------------------------
     domains = _ordered_domains(pack, ranked)
@@ -218,6 +233,19 @@ def render_report(
     else:
         lines.append("None.")
 
+    # Manual steps pending ---------------------------------------------------------
+    manual_steps = manual_steps or []
+    if manual_steps:
+        lines += ["", "## Manual steps pending", ""]
+        lines.append(
+            "These stages are waiting on YOU, not on a failure. Do the step, then re-run "
+            "`uv run reap-lab sweep <your-sweep.yaml>` — completed work resumes automatically."
+        )
+        for step in manual_steps:
+            lines += ["", f"### `{step.get('stage')}:{step.get('key')}`", ""]
+            instructions = str(step.get("instructions") or "").strip()
+            lines += [f"    {line}" for line in instructions.splitlines()] or ["    (no details)"]
+
     # Promotion footer -------------------------------------------------------------
     lines += [
         "",
@@ -225,9 +253,25 @@ def render_report(
         "",
         "To place the winner in LM Studio (with decision page, smoke test, and archival):",
         "",
-        f"    uv run reap-lab promote <your-sweep.yaml> --artifact {winner_id or '<artifact-id>'}",
+        "    uv run reap-lab promote <your-sweep.yaml>",
         "",
     ]
+    if winner_id:
+        lines += [
+            f"That promotes the stored winner, `{winner_id}`. To promote a different artifact "
+            "from this sweep instead:",
+            "",
+            "    uv run reap-lab promote <your-sweep.yaml> --artifact <artifact-id>",
+            "",
+        ]
+    else:
+        lines += [
+            "No candidate passed all blocking gates, so `promote` has no winner to place. "
+            "Promote a specific artifact anyway (at your own risk) with:",
+            "",
+            "    uv run reap-lab promote <your-sweep.yaml> --artifact <artifact-id>",
+            "",
+        ]
     return "\n".join(lines)
 
 

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from reaplab.core.records import TaskType
 
@@ -26,6 +26,8 @@ class ProviderCfg(BaseModel):
       mock          -- deterministic offline provider for tests and `reap-lab demo`
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     kind: Literal["claude-cli", "openai-compat", "anthropic-api", "mock"]
     model: str | None = None
     base_url: str | None = None  # openai-compat only; default http://localhost:1234/v1 (LM Studio)
@@ -38,6 +40,8 @@ class ProviderCfg(BaseModel):
 
 class DomainSpec(BaseModel):
     """One workload domain inside a pack. weight = share of the runtime mix (PRD FR-1.1)."""
+
+    model_config = ConfigDict(extra="forbid")
 
     name: str
     description: str
@@ -61,6 +65,8 @@ class DomainPack(BaseModel):
     """A user's workload described as weighted domains. Ships with examples in
     configs/domain-packs/; users author their own or let `reap-lab init` draft one."""
 
+    model_config = ConfigDict(extra="forbid")
+
     name: str
     description: str = ""
     domains: list[DomainSpec]
@@ -70,6 +76,13 @@ class DomainPack(BaseModel):
     def _non_empty(self) -> DomainPack:
         if not self.domains:
             raise ValueError("domain pack needs at least one domain")
+        names = [d.name for d in self.domains]
+        dupes = sorted({n for n in names if names.count(n) > 1})
+        if dupes:
+            raise ValueError(
+                f"duplicate domain name(s) in pack: {', '.join(dupes)} — item allocation "
+                "is keyed by name, so every domain needs a unique one"
+            )
         return self
 
     def normalized_weights(self) -> dict[str, float]:
@@ -85,6 +98,8 @@ class DomainPack(BaseModel):
 class DataCfg(BaseModel):
     """Dataset generation knobs (PRD FR-1.2/FR-1.3)."""
 
+    model_config = ConfigDict(extra="forbid")
+
     calibration_size: int = 1000
     eval_size: int = 300
     near_dup_threshold: float = 0.90  # block cosine/similarity >= this between cal and eval
@@ -95,6 +110,8 @@ class DataCfg(BaseModel):
 
 class Gates(BaseModel):
     """Promotion gates, defaults from PRD §5. All limits user-tunable."""
+
+    model_config = ConfigDict(extra="forbid")
 
     min_quality_retention: float = 0.95  # weighted score vs. baseline; blocker
     max_domain_regression_pts: float = 5.0  # any single domain; blocker
@@ -110,6 +127,8 @@ class RemoteCfg(BaseModel):
     """Remote prune profile (PRD FR-2.2): we generate a self-contained provision->prune->
     download->teardown script; the user runs it against their GPU rental of choice."""
 
+    model_config = ConfigDict(extra="forbid")
+
     provider: str = "runpod"  # informational; script is provider-agnostic bash over SSH
     budget_usd: float = 75.0
     usd_per_hour: float = 2.5  # used with budget to compute a max-hours kill switch
@@ -118,6 +137,8 @@ class RemoteCfg(BaseModel):
 
 
 class PruneCfg(BaseModel):
+
+    model_config = ConfigDict(extra="forbid")
     execution_profile: Literal["mock", "local-offload", "remote"] = "remote"
     reap_repo: str = "https://github.com/CerebrasResearch/reap"
     # Pin at/after 3a44d0c (router-logit renormalization, 2026-03-13). Default is the
@@ -137,8 +158,11 @@ class RuntimeCfg(BaseModel):
     ships to. kind=openai-compat points at an already-running server (LM Studio included);
     kind=llama-server launches/kills llama-server per artifact; mock for tests/demo."""
 
+    model_config = ConfigDict(extra="forbid")
+
     kind: Literal["llama-server", "openai-compat", "mock"] = "llama-server"
     base_url: str | None = None
+    model: str | None = None  # openai-compat: the server-side model name to request
     llama_server_path: str | None = None  # auto-discovered by doctor when None
     contexts: list[int] = Field(default_factory=lambda: [4096, 32768])
     gpu_layers: int = -1  # -1 = all layers on GPU
@@ -146,12 +170,16 @@ class RuntimeCfg(BaseModel):
 
 
 class JudgeCfg(BaseModel):
+
+    model_config = ConfigDict(extra="forbid")
     provider: ProviderCfg
     votes: int = 3  # majority vote on open-ended items (PRD FR-3.3)
     version: str = "j1"  # bump to invalidate the judgment cache
 
 
 class PromoteCfg(BaseModel):
+
+    model_config = ConfigDict(extra="forbid")
     lmstudio_dir: str | None = None  # auto-detect (%USERPROFILE%/.lmstudio/models) when None
     publisher: str = "reap-lab"
     smoke_command: str | None = None  # e.g. your dispatcher's smoke test; {model} substituted
@@ -161,6 +189,8 @@ class PromoteCfg(BaseModel):
 
 class SweepSpec(BaseModel):
     """Everything one sweep needs. YAML-loadable; hash-stable."""
+
+    model_config = ConfigDict(extra="forbid")
 
     model_id: str
     domain_pack: str  # path to a pack YAML (resolved relative to the spec file)
@@ -208,9 +238,52 @@ class SweepSpec(BaseModel):
         return spec
 
     def config_hash(self) -> str:
-        """Reproducibility key. Excludes fields that don't affect artifacts or scores
-        (workspace location, promotion targets)."""
+        """Reproducibility key: same hash -> same datasets, artifacts, and scores.
+
+        Two deliberate properties:
+        - File-reference fields (domain_pack, calibration, eval, baseline_gguf) are
+          hashed by CONTENT, not path — editing the pack mints a new hash (fresh run
+          dir, fresh datasets) and the same pack at a different path resumes cleanly.
+        - Fields that change neither artifacts nor measured scores are excluded:
+          workspace/promotion targets, gate thresholds (they re-rank existing
+          measurements), and local runtime plumbing (port, server binary path).
+        """
         from reaplab.core.hashing import canonical_hash
 
-        payload = self.model_dump(mode="json", exclude={"workspace", "promote", "min_free_disk_gb"})
+        payload = self.model_dump(
+            mode="json",
+            exclude={
+                "workspace": True,
+                "promote": True,
+                "min_free_disk_gb": True,
+                "gates": True,
+                "domain_pack": True,
+                "calibration": True,
+                "eval": True,
+                "baseline_gguf": True,
+                "runtime": {"port", "llama_server_path"},
+            },
+        )
+        payload["domain_pack_content"] = self._content_key("domain_pack", parse_pack=True)
+        for attr in ("calibration", "eval", "baseline_gguf"):
+            if getattr(self, attr):
+                payload[f"{attr}_content"] = self._content_key(attr)
         return canonical_hash(payload)
+
+    def _content_key(self, attr: str, parse_pack: bool = False) -> str:
+        """Content identity of a referenced file. Packs hash their PARSED form (comment
+        and whitespace edits don't invalidate runs); other files hash raw bytes. A
+        missing file falls back to its path string so synthetic specs (tests) still
+        hash — real runs fail later with a clear file-not-found."""
+        from reaplab.core.hashing import canonical_hash, file_hash
+
+        raw = getattr(self, attr)
+        path = Path(raw)
+        if not path.exists():
+            return f"missing:{raw}"
+        if parse_pack:
+            try:
+                return canonical_hash(DomainPack.from_yaml(path).model_dump(mode="json"))
+            except Exception:  # noqa: BLE001 - invalid pack: hash bytes, fail loudly later
+                pass
+        return file_hash(path)
