@@ -148,6 +148,7 @@ Frontier calls fit inside a Claude Code subscription (or a few dollars of API cr
 - **[ARCHITECTURE.md](docs/ARCHITECTURE.md)** — how the four components fit; workspace layout; reproducibility
 - **[REMOTE_GPU.md](docs/REMOTE_GPU.md)** — the one step that needs a rented GPU
 - **[RESEARCH_BRIEF.md](docs/RESEARCH_BRIEF.md)** — grounded facts on REAP, llama.cpp, LM Studio
+- **[TRACEABILITY.md](docs/TRACEABILITY.md)** — every requirement → its implementation and test
 
 ## Status
 

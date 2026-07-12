@@ -323,3 +323,43 @@ def test_pruned_scores_below_baseline_end_to_end(env, make_manifest, make_record
     assert base["false_refusal_rate"] <= r05["false_refusal_rate"]
     assert base["should_refuse_pass_rate"] >= r05["should_refuse_pass_rate"]
     assert base["tool_call_validity"] >= r05["tool_call_validity"]
+
+
+def test_bumping_judge_version_rejudges_instead_of_reusing(env, make_manifest):
+    """judge.version is the documented 'invalidate my judgments' knob, and it is
+    deliberately OUTSIDE the config hash (bumping it must not regenerate datasets).
+    What makes that safe is this: a bumped version re-judges the stored rows."""
+    spec, ws, state, records = env
+    base = evaluate_artifact(spec, make_manifest(), records, ws, state)
+    cand = make_manifest(artifact_id="r0.75-q4_k_m", kind="gguf", retention=0.75)
+
+    first = CountingMockRunner()
+    evaluate_artifact(
+        spec, cand, records, ws, state, runner=first, baseline_responses=base["responses"]
+    )
+    assert first.scoring_calls == len(records)
+
+    # same judge version -> everything resumes, nothing is re-scored
+    again = CountingMockRunner()
+    evaluate_artifact(
+        spec, cand, records, ws, state, runner=again, baseline_responses=base["responses"]
+    )
+    assert again.scoring_calls == 0
+
+    # bumped judge version -> ONLY the judged (open-ended) rows are re-scored
+    spec.judge.version = "j-bumped"
+    bumped = CountingMockRunner()
+    evaluate_artifact(
+        spec, cand, records, ws, state, runner=bumped, baseline_responses=base["responses"]
+    )
+    open_ended = [r for r in records if r.task_type == TaskType.OPEN_ENDED]
+    assert bumped.scoring_calls == len(open_ended)
+
+    rows = [
+        r
+        for r in read_jsonl(ws.results_jsonl(spec.config_hash()), ItemResult)
+        if r.artifact_id == cand.artifact_id and r.task_type == TaskType.OPEN_ENDED
+    ]
+    assert rows and all(r.detail.get("judge_version") == "j-bumped" for r in rows)
+    # and the results file did not grow duplicates
+    assert len(rows) == len(open_ended)
