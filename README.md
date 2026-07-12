@@ -94,10 +94,12 @@ If a free checkpoint already clears your bar, you're done — no prune run neede
 Winner: r0.75-q4_k_m — highest weighted score among candidates passing all blocking gates.
 
 Anomalies
-- r0.5-q4_k_m: domain `extract_order` dropped 14.3 pts vs baseline (limit 12)
-- r0.5-q4_k_m: tool-call schema validity 94.1% < 98% gate
-- r0.5-q4_k_m: false-refusal rate regressed vs baseline (10.0% > 0.0%)
+- r0.625-q5_k_m: domain `extract_order` dropped 14.3 pts vs baseline (limit 12)
+- r0.5-q4_k_m:   domain `classify_request` dropped 13.5 pts vs baseline (limit 12)
+- r0.5-q4_k_m:   false-refusal rate regressed vs baseline (10.0% > 0.0%)
 ```
+
+That's real output from `reap-lab demo` — the aggressive candidates get *cheaper and faster*, and the report shows you exactly what they cost you.
 
 Plus a per-domain breakdown, a quality-vs-VRAM-vs-speed Pareto front, a regression diff, and every failed config with its error.
 
