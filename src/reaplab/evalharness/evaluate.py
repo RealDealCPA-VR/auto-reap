@@ -115,6 +115,7 @@ def _reusable(
     manifest: ArtifactManifest,
     record: EvalRecord,
     baseline_responses: dict[str, str] | None,
+    judge_version: str | None = None,
 ) -> bool:
     """True when a stored row still describes the measurement we would make now."""
     if manifest.artifact_hash is None or prior.artifact_hash is None:
@@ -122,7 +123,14 @@ def _reusable(
     if prior.artifact_hash != manifest.artifact_hash:
         return False  # same id, different bytes
     if record.task_type == TaskType.OPEN_ENDED:
-        return prior.scorer == open_ended_scorer_name(manifest, record, baseline_responses)
+        if prior.scorer != open_ended_scorer_name(manifest, record, baseline_responses):
+            return False
+        # judge.version is the documented "invalidate my judgments" knob: a bumped
+        # version must re-judge, not silently reuse the previous verdicts. (It is
+        # deliberately OUTSIDE the config hash, so bumping it costs re-judging —
+        # not a whole new run with regenerated datasets.)
+        if prior.scorer == JUDGE_SCORER and judge_version is not None:
+            return prior.detail.get("judge_version") == judge_version
     return True
 
 
@@ -132,6 +140,7 @@ def _resume_rows(
     eval_records: list[EvalRecord],
     baseline_responses: dict[str, str] | None,
     resume: bool,
+    judge_version: str | None = None,
 ) -> dict[str, ItemResult]:
     """Prune results.jsonl to the rows we can still trust and return them by item_id.
 
@@ -152,7 +161,9 @@ def _resume_rows(
             keep.append(row)  # another artifact's row: never our business
             continue
         record = by_id.get(row.item_id)
-        if resume and record is not None and _reusable(row, manifest, record, baseline_responses):
+        if resume and record is not None and _reusable(
+            row, manifest, record, baseline_responses, judge_version
+        ):
             keep.append(row)
             reusable[row.item_id] = row
             continue
@@ -195,7 +206,10 @@ def evaluate_artifact(
     results_path = workspace.results_jsonl(config_hash)
     judge_cache_dir = workspace.judge_cache / config_hash  # judgments are per-sweep
 
-    done = _resume_rows(results_path, manifest, eval_records, baseline_responses, resume)
+    done = _resume_rows(
+        results_path, manifest, eval_records, baseline_responses, resume,
+        judge_version=spec.judge.version,
+    )
 
     contexts = sorted(set(spec.runtime.contexts)) or [4096]
     scoring_context = contexts[-1]  # long-context items (FR-1.4) need the biggest one

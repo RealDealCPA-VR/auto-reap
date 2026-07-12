@@ -31,7 +31,7 @@ Rendered as "stage:key" in reports, e.g. "prune:r0.5", "sweep:r0.5".
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -237,6 +237,16 @@ def _vram_gb(summary: dict[str, Any], context: int) -> float | None:
     return mb / 1024.0 if mb is not None else None
 
 
+def _build_seconds(manifests: Iterable[ArtifactManifest]) -> float | None:
+    """Total artifact build wall-clock (PRD §5's advisory overnight-window metric).
+
+    Resumed stages contribute 0 to their manifest's wall_clock_s, so this reports the
+    time actually spent building, not the time since the sweep started. None when no
+    manifest recorded a duration."""
+    seconds = [m.wall_clock_s for m in manifests if m.wall_clock_s is not None]
+    return sum(seconds) if seconds else None
+
+
 def _manifest_from_state(state: StateDB, artifact_id: str) -> ArtifactManifest:
     """Load an artifact manifest from the prune component's ("convert", id) done-meta.
 
@@ -436,6 +446,7 @@ def render_report_from_state(spec: SweepSpec) -> Path:
         md = render_report(
             spec, config_hash, pack, snapshot.rows, snapshot.winner_id,
             snapshot.failed_jobs, snapshot.manual_steps,
+            build_seconds=_build_seconds(snapshot.manifests.values()),
         )
     return write_report(workspace, config_hash, md)
 
@@ -478,6 +489,7 @@ def promote_from_state(spec: SweepSpec, artifact_id: str | None = None) -> Promo
         md = render_report(
             spec, config_hash, pack, snapshot.rows, snapshot.winner_id,
             snapshot.failed_jobs, snapshot.manual_steps,
+            build_seconds=_build_seconds(snapshot.manifests.values()),
         )
         report_path = write_report(workspace, config_hash, md)
         row = next(r for r in snapshot.rows if r.artifact_id == target)
@@ -687,7 +699,10 @@ def run_sweep(
 
         # -- report ------------------------------------------------------------------
         failed_jobs = [j for j in state.jobs() if j["status"] == "failed"]
-        md = render_report(spec, config_hash, pack, rows, winner_id, failed_jobs, manual_steps)
+        md = render_report(
+            spec, config_hash, pack, rows, winner_id, failed_jobs, manual_steps,
+            build_seconds=_build_seconds(manifests_by_id.values()),
+        )
         report_path = write_report(workspace, config_hash, md)
         console.print(f"report: {report_path}")
         if winner_id:

@@ -25,10 +25,15 @@ from __future__ import annotations
 
 import json
 import logging
+import platform
+import re
+import subprocess
 import time
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from reaplab import __version__
 from reaplab.core.config import SweepSpec
 from reaplab.core.hashing import artifact_hash
 from reaplab.core.paths import Workspace
@@ -119,14 +124,45 @@ def validated_quants(spec: SweepSpec) -> list[str]:
     return [gguf.validate_quant(q) for q in spec.quants]
 
 
+@lru_cache(maxsize=8)
+def _llama_cpp_build(quantize_bin: str) -> str:
+    """The llama.cpp build behind a llama-quantize binary, e.g. "b9966 (a1b2c3d)".
+
+    llama-quantize prints its build banner on stderr when invoked with no args (and
+    exits nonzero — that is expected). Best-effort: an unreadable banner records
+    "unknown" rather than failing a prune (PRD FR-3.5 wants versions pinned in the
+    manifest, but a missing banner is not a reason to lose the run)."""
+    try:
+        proc = subprocess.run(  # noqa: S603 - path came from our own discovery
+            [quantize_bin],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=20,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+    blob = f"{proc.stderr or ''}\n{proc.stdout or ''}"
+    match = re.search(r"version:\s*(\d+)\s*\(([0-9a-f]+)\)", blob)
+    if match:
+        return f"b{match.group(1)} ({match.group(2)})"
+    match = re.search(r"\bbuild[:\s]+(\S+)", blob)
+    return match.group(1) if match else "unknown"
+
+
 def _tool_versions(spec: SweepSpec, tools: gguf.LlamaCppTools | None) -> dict[str, str]:
+    """Provenance for one artifact (PRD FR-2.3/FR-3.5): what produced it, at what version."""
     versions = {
+        "reaplab": __version__,
+        "python": platform.python_version(),
         "reap_commit": spec.prune.reap_commit,
         "execution_profile": spec.prune.execution_profile,
     }
     if tools is not None:
         versions["convert_hf_to_gguf"] = str(tools.convert_script)
         versions["llama_quantize"] = str(tools.quantize_bin)
+        versions["llama_cpp_build"] = _llama_cpp_build(str(tools.quantize_bin))
     else:
         versions["gguf_tools"] = "mock"
     return versions
@@ -237,7 +273,12 @@ def build_artifacts(
         saliency_stats = prune_meta.get("saliency_stats")
     else:
         profile = profiles.get_profile(
-            spec, work_dir=workspace.root / "prune", log_dir=workspace.logs(config_hash)
+            # per-config work dir: a tarball produced for a DIFFERENT pack (hence
+            # different calibration data) must never be picked up as this config's
+            # pruned checkpoint just because it shares a retention value
+            spec,
+            work_dir=workspace.run_dir(config_hash) / "prune",
+            log_dir=workspace.logs(config_hash),
         )
         state.mark_running(stage, key)
         t0 = time.monotonic()

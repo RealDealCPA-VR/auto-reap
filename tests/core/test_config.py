@@ -96,3 +96,23 @@ def test_duplicate_domain_names_rejected():
     dom = {"name": "d", "description": "x"}
     with pytest.raises(ValueError, match="duplicate domain name"):
         DomainPack.model_validate({"name": "p", "domains": [dom, dict(dom)]})
+
+
+def test_judge_version_is_outside_the_config_hash(example_sweep_path):
+    """Bumping judge.version must re-judge in place, not mint a new run (which would
+    regenerate every dataset). The judge PROVIDER still counts — it changes scores."""
+    a = SweepSpec.from_yaml(example_sweep_path)
+    b = SweepSpec.from_yaml(example_sweep_path)
+    b.judge.version = "j2"
+    assert a.config_hash() == b.config_hash()
+    b.judge.votes = 5
+    assert a.config_hash() != b.config_hash()
+
+
+def test_prune_cfg_has_no_dead_dtype_knobs():
+    """REAP hardcodes torch_dtype/device_map — exposing them would be config that
+    silently does nothing while invalidating cached work."""
+    from reaplab.core.config import PruneCfg
+
+    assert "dtype" not in PruneCfg.model_fields
+    assert "device_map" not in PruneCfg.model_fields

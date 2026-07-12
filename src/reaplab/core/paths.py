@@ -1,11 +1,20 @@
-"""Workspace layout. Everything a sweep touches lives under one root:
+"""Workspace layout. Everything a sweep touches lives under one root, and everything
+a sweep *generates* is namespaced by its config hash — two specs sharing a workspace
+can never read or clobber each other's data:
 
 workspace/
-  data/                    generated datasets (calibration_v*.jsonl, eval_v*.jsonl)
-  artifacts/               pruned HF checkpoints and GGUFs
-  runs/<config_hash>/      per-sweep state.db, results.jsonl, manifests, logs
-  reports/                 rendered markdown reports + decision pages
-  cache/judge/             judgment cache keyed (item_id, artifact_hash, judge_version)
+  runs/<config_hash>/
+      data/                 calibration_v1.jsonl, eval_v1.jsonl, dedup report,
+                            audit sample, and REAP's converted calibration_dataset/
+      manifests/            <artifact_id>.json (provenance per artifact)
+      prune/                generated remote scripts, instructions, downloaded tarballs
+      logs/                 per-stage logs
+      state.db              resumable job state
+      results.jsonl         per-item eval results
+  artifacts/<config_hash>/  pruned HF checkpoints and GGUFs (incl. baseline/)
+  cache/judge/<config_hash>/ judgments keyed (item_id, artifact_hash, judge_version)
+  reports/                  rendered markdown reports + decision pages
+  archive/                  non-winning GGUFs, moved (never deleted) on promotion
 """
 
 from __future__ import annotations

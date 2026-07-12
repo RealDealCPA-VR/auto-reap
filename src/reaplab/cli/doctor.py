@@ -126,6 +126,46 @@ def _check_disk(spec: SweepSpec | None) -> Check:
     return ("disk", "OK", f"{free:.0f} GB free (guard: {need:g} GB)")
 
 
+#: Base models whose licenses permit modification + local commercial use. Pruning a
+#: model IS modification, so this is a real constraint, not paperwork (PRD §8).
+_KNOWN_PERMISSIVE = {
+    "qwen": "Apache-2.0",
+    "mistral": "Apache-2.0",
+    "mixtral": "Apache-2.0",
+    "glm": "MIT (GLM-4.5/4.6 series)",
+    "deepseek": "MIT (V3 series)",
+    "granite": "Apache-2.0",
+    "olmo": "Apache-2.0",
+}
+
+
+def _check_license(spec: SweepSpec | None) -> Check:
+    """PRD §8: the base model must permit modification and local commercial use.
+    We can't adjudicate a license — we can make sure the user looked."""
+    if spec is None:
+        return (
+            "base model license",
+            "WARN",
+            "no sweep spec given. Pruning is MODIFICATION: confirm your base model's license "
+            "allows it (and local commercial use) before you ship a pruned checkpoint.",
+        )
+    model = spec.model_id.lower()
+    for needle, license_name in _KNOWN_PERMISSIVE.items():
+        if needle in model:
+            return (
+                "base model license",
+                "OK",
+                f"{spec.model_id} is commonly {license_name} — permits modification + local "
+                "commercial use. Verify the specific checkpoint's card; licenses change per release.",
+            )
+    return (
+        "base model license",
+        "WARN",
+        f"{spec.model_id}: license not recognized. Pruning is MODIFICATION — check the model card "
+        "permits it (and local commercial use, if that's your use case) before promoting.",
+    )
+
+
 def _check_git_uv() -> Check:
     missing = [t for t in ("git", "uv") if not shutil.which(t)]
     if missing:
@@ -176,6 +216,7 @@ def run_doctor(console: Console, spec_path: Path | None = None, strict: bool = F
     checks.append(_check_lmstudio(spec))
     checks.append(_check_disk(spec))
     checks.append(_check_git_uv())
+    checks.append(_check_license(spec))
     if spec is not None:
         checks.append(_check_provider("generator provider", spec.generator))
         checks.append(_check_provider("judge provider", spec.judge.provider))

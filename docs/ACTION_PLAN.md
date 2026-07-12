@@ -21,10 +21,10 @@
 | Claude Agent SDK as the frontier model | **Pluggable providers**: `claude-cli` (subscription, zero-key), `anthropic-api`, `openai-compat` (works with LM Studio, Ollama, llama-server, OpenRouter, OpenAI), `mock` (offline). Same interface for generation *and* judging. |
 | vr-dispatch / hermes-brain integration | Generic hooks: promotion runs a configurable smoke-test command; decision page is written to a configurable directory. |
 | RTX 6000 Ada 48 GB | VRAM ceiling, context target, and LM Studio directory are all config values with auto-detection (`nvidia-smi`, standard install paths). |
-| Firm PDF redaction tool | Seed material is optional; if provided, user points at any redaction command. Default flow is fully synthetic. |
+| Firm PDF redaction tool | **Dropped, not generalized.** There is no seed-material ingestion path at all: every calibration and eval item is *generated* — procedurally in mock mode, otherwise by the frontier provider from the domain pack's descriptions and `prompt_guidance`. No user document, PDF, log or transcript ever enters the pipeline, so there is nothing to redact and no PII-redaction hook exists. (`spec.calibration` / `spec.eval` can point at pre-existing JSONL *datasets* you built yourself — those are your files, validated and re-emitted as-is, never scraped from source material.) |
 
 ### Key feasibility notes
-- Actual REAP pruning of a 30B MoE needs ~60 GB+ (bf16) → the prune step runs on a **remote 80 GB GPU** (scripted provision → prune → download → teardown) or `local-offload` if the user has the RAM+patience. The lab machine never needs to hold the bf16 model.
+- Actual REAP pruning of a 30B MoE needs ~60 GB+ (bf16) → the prune step runs on a **remote 80 GB GPU** (generated, budget-capped provisioning script: provision → prune → package → download; destroying the instance stays the user's explicit step, since a guest-side shutdown bills on and kills the shell you need to fetch the tarball) or `local-offload` if the user has the RAM+patience — Linux/WSL only, since reap's vllm/torch pins have no Windows wheels. The lab machine never needs to hold the bf16 model.
 - Everything else — data generation, GGUF conversion of a downloaded pruned checkpoint, evaluation, reporting, promotion — runs locally.
 - The pipeline is **fully testable offline**: a `mock` provider, a mock pruner, and a mock model runner let `reap-lab demo` execute the entire flow (data → "prune" → "convert" → eval → report → promote) in seconds with zero GPU/network. This is the primary validation vehicle in this build; real GPU runs are the user's M2+.
 
@@ -58,9 +58,10 @@ src/reaplab/
     records.py   # CalibrationRecord, EvalRecord, ItemResult, ArtifactManifest, PerfMetrics
     providers/   # LLMProvider base + claude_cli / openai_compat / anthropic_api / mock
     hashing.py   # canonical config_hash, streamed artifact_hash
-    state.py     # SQLite job state: claim/complete/fail/resume
+    state.py     # SQLite job state: claim/complete/fail/manual/resume
     jsonl.py     # schema-validated JSONL read/write/append
-    paths.py     # workspace layout: runs/<hash>/, data/, artifacts/, reports/, cache/
+    paths.py     # workspace layout: runs/<hash>/{data,manifests,logs}, artifacts/<hash>/,
+                 #   prune/ (remote scripts + tarballs), reports/, cache/judge/<hash>/, archive/
   datagen/       # C1: pack-driven generation, dedup/leakage filter, refusal suites, audit sampling
   prune/         # C2: reap runner (local-offload/remote/mock), remote provisioning script-gen, GGUF convert+quant
   evalharness/   # C3: openai-compat runner, scorers (exact/json_schema/tool_call/refusal/judge), perf, judge cache

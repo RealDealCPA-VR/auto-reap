@@ -106,6 +106,10 @@ class ArtifactManifest(BaseModel):
     config_hash: str
     artifact_hash: str | None = None  # streamed content hash once materialized
     reap_commit: str | None = None
+    # Populated only if the pruning run emits a kept-expert index map. REAP (as pinned)
+    # does not: its saved config.json carries expert COUNTS, not the kept indices, so
+    # this is normally None and `saliency_stats` carries the counts. Recording a guessed
+    # map would be worse than recording none. See docs/TRACEABILITY.md (FR-2.3).
     retained_expert_map: dict[str, list[int]] | None = None
     saliency_stats: dict[str, Any] | None = None
     wall_clock_s: float | None = None

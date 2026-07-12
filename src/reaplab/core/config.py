@@ -144,8 +144,10 @@ class PruneCfg(BaseModel):
     # Pin at/after 3a44d0c (router-logit renormalization, 2026-03-13). Default is the
     # 2026-04-17 layerwise-observer commit — see docs/RESEARCH_BRIEF.md.
     reap_commit: str = "1970473"
-    dtype: str = "bfloat16"
-    device_map: str = "auto"
+    # NOTE: REAP (as pinned) hardcodes torch_dtype="auto" and device_map="auto" in
+    # prune.py — they are not CLI flags. Exposing dtype/device_map knobs here would be
+    # dead config that silently does nothing (and would invalidate cached work when
+    # changed), so they are deliberately absent. See docs/TRACEABILITY.md (FR-2.1).
     remote: RemoteCfg = Field(default_factory=RemoteCfg)
     # llama.cpp tooling pins; when None, discovery falls back to env vars
     # (CONVERT_HF_TO_GGUF, LLAMA_QUANTIZE, LLAMA_CPP_DIR), PATH, then common dirs.
@@ -174,7 +176,9 @@ class JudgeCfg(BaseModel):
     model_config = ConfigDict(extra="forbid")
     provider: ProviderCfg
     votes: int = 3  # majority vote on open-ended items (PRD FR-3.3)
-    version: str = "j1"  # bump to invalidate the judgment cache
+    # Bump to invalidate cached judgments: judged items are re-judged in place on the
+    # next run (same config hash — datasets and artifacts are NOT regenerated).
+    version: str = "j1"
 
 
 class PromoteCfg(BaseModel):
@@ -246,7 +250,10 @@ class SweepSpec(BaseModel):
           dir, fresh datasets) and the same pack at a different path resumes cleanly.
         - Fields that change neither artifacts nor measured scores are excluded:
           workspace/promotion targets, gate thresholds (they re-rank existing
-          measurements), and local runtime plumbing (port, server binary path).
+          measurements), local runtime plumbing (port, server binary path), and
+          judge.version — bumping it invalidates cached judgments and re-judges
+          open-ended items in place, which is the whole point of the knob; minting
+          a new run (and regenerating every dataset) would make it unusable.
         """
         from reaplab.core.hashing import canonical_hash
 
@@ -262,6 +269,7 @@ class SweepSpec(BaseModel):
                 "eval": True,
                 "baseline_gguf": True,
                 "runtime": {"port", "llama_server_path"},
+                "judge": {"version"},
             },
         )
         payload["domain_pack_content"] = self._content_key("domain_pack", parse_pack=True)

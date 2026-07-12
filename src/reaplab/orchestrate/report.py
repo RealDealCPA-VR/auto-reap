@@ -78,6 +78,7 @@ def render_report(
     winner_id: str | None,
     failed_jobs: list[dict[str, Any]] | None = None,
     manual_steps: list[dict[str, Any]] | None = None,
+    build_seconds: float | None = None,
 ) -> str:
     """Render the full sweep report as a markdown string.
 
@@ -92,6 +93,8 @@ def render_report(
         manual_steps: stages waiting on a human action (keys: stage, key,
             instructions) — e.g. a remote prune whose script must be run by
             hand. Rendered as "Manual steps pending"; these are NOT failures.
+        build_seconds: total artifact build wall-clock summed across manifests
+            (PRD §5's advisory "full sweep fits in an overnight window" metric).
     """
     gates_cfg = spec.gates
     ranked = sorted(rows, key=lambda r: r.weighted, reverse=True)
@@ -106,6 +109,12 @@ def render_report(
         f"- **Date:** {now}",
         f"- **Sweep grid:** retention {spec.retention} x quants {spec.quants}",
         f"- **Domain pack:** `{pack.name}`",
+    ]
+    if build_seconds is not None:
+        hours = build_seconds / 3600.0
+        window = "within the overnight window" if hours <= 12 else "OVER the 12 h overnight window"
+        lines.append(f"- **Artifact build time:** {hours:.2f} h — {window} (advisory)")
+    lines += [
         "",
         "## Ranked candidates",
         "",

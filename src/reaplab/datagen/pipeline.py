@@ -51,7 +51,7 @@ AUDIT_SAMPLE_FILENAME = "eval_v1_audit_sample.md"
 
 # StateDB coordinates for this stage (shared contract: stage key "datagen").
 STAGE = "datagen"
-STAGE_KEY = "datagen"
+STAGE_KEY = "datasets"  # must match orchestrate/sweep.py: one row per stage, not two
 
 
 def _stage_done(state: StateDB) -> bool:
