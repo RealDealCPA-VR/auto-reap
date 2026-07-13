@@ -1,14 +1,73 @@
 # reap-lab
 
-**Cut a Mixture-of-Experts model down to the experts *your* work actually uses — then prove it still does your job before you trust it.**
+### Make a big AI model small enough to run on your own computer — and prove it's still good at *your* job before you trust it.
 
-Frontier-quality MoE checkpoints don't fit consumer GPUs. Generic pruned checkpoints fit, but nobody can tell you what they *lost* — least of all on your workload. `reap-lab` closes that loop: it generates calibration and eval data from a plain-English description of what your model does all day, runs [REAP](https://github.com/CerebrasResearch/reap) expert pruning across a retention sweep, evaluates **the exact GGUF that will ship** on **the runtime that will serve it**, and hands you a ranked report with hard promotion gates. The winner lands in LM Studio. Nothing gets promoted on vibes.
+Some of the best open AI models are built like a **consulting firm of 128 specialists**. Every question goes to just a handful of them — but you still have to keep all 128 in the building, which is why these models need a data-center graphics card and won't run on yours.
+
+Here's the thing: **most of those specialists never touch your work.** If you do bookkeeping, the poetry expert sits idle all day. You're paying rent on people you never call.
+
+**`reap-lab` finds out which specialists your work actually uses, lets the rest go, and then re-interviews the smaller firm to prove it still does your job as well as the big one did.**
+
+You end up with a model that fits on your machine, runs faster, and comes with **evidence** — not hope — that it didn't get dumber at the things you care about.
+
+### What you actually get
+
+Taking a well-known model (Qwen3-30B) as the example:
+
+| | Before | After (keep 75% of experts, compressed) |
+|---|---|---|
+| **Size** | ~61 GB — needs a rented data-center GPU | **~15 GB** — fits a normal gaming GPU |
+| **Quality on your work** | 100% (this is the yardstick) | **must score ≥ 95% or it is not installed** |
+| **Speed** | baseline | faster — fewer specialists to load per answer |
+| **Runs where** | someone else's cloud | your computer, offline, private |
+
+Two honest caveats, because this tool's whole point is not overselling:
+
+- **The sizes are estimates** (standard rules of thumb — see the [VRAM table](docs/QUICKSTART.md#vram-reality-table)); the exact numbers depend on your model.
+- **The quality figure is a *rule*, not a promise.** reap-lab doesn't claim your shrunk model will hit 95% — it *measures* what it actually hits, and refuses to install it if it falls short. Sometimes the answer is "cutting this model in half broke it," and the report will tell you so plainly.
+
+### See it work in 60 seconds
 
 ```
-reap-lab demo      # the entire pipeline, offline, in a minute — no GPU, no API key
-reap-lab init      # describe your workload; get a domain pack + sweep spec
-reap-lab sweep my-sweep.yaml
+reap-lab demo
 ```
+
+This runs the **entire process end to end** on your machine right now — no expensive GPU, no API key, no signup — and hands you the same report the real thing produces. It's how you check the machinery works before spending a cent.
+
+### Is this for you?
+
+**Yes, if** you want to run AI privately on your own hardware, you have a specific kind of work you do with it (customer support, code, bookkeeping, research…), and you need to *know* the cheaper model didn't quietly get worse at it.
+
+**Probably not, if** you just want a chatbot and don't care where it runs — use a hosted one.
+
+**You will need:** a decent GPU to run the final model, and about **$5–15 of rented GPU time** for the one heavy step. Everything else runs on your machine.
+
+---
+
+<details>
+<summary><b>📖 Jargon decoder</b> — every term below this line, in plain English (click to expand)</summary>
+
+<br>
+
+| Term | What it actually means |
+|---|---|
+| **Mixture-of-Experts (MoE)** | The "consulting firm" model design: many specialists, only a few consulted per question — but all of them must be loaded into memory. |
+| **Expert / pruning** | A specialist. *Pruning* = permanently removing the ones your work never calls. |
+| **REAP** | The published technique (from Cerebras) that decides *which* experts are safe to remove. reap-lab uses it; it didn't invent it. |
+| **Retention** | How many specialists you keep. `0.5` = keep half. Smaller model, more risk — hence the testing. |
+| **Calibration data** | Sample questions, like your real work, that the model answers while we watch which specialists it calls. It's how we learn who's idle. |
+| **Eval set** | A separate exam the model has never seen, used to score it afterwards. Kept strictly separate from calibration so it can't cheat. |
+| **Quantization / GGUF / Q4_K_M** | Compressing the model's numbers to shrink it further. GGUF is the file format your computer runs. Q4/Q5/Q6 = how aggressive the compression is. |
+| **VRAM** | Your graphics card's memory. The whole point: make the model fit inside it. |
+| **Baseline** | The original, un-shrunk model. Everything is scored *relative to it* — that's how we know what was lost. |
+| **Gate** | A pass/fail rule. If a shrunk model fails any of them, it does not get installed. Full stop. |
+| **LM Studio** | A free app that runs AI models on your computer. The winner gets installed there automatically. |
+
+</details>
+
+---
+
+**Everything below is written for engineers.** If you just wanted to know what this does, you're done — run `reap-lab demo` and look at the report it writes.
 
 ---
 
@@ -24,6 +83,8 @@ Expert pruning is one-shot and cheap — Cerebras's REAP removes 25–50% of exp
 
 ## What it does
 
+The whole pipeline in one line: **describe your work → make practice questions → shrink the model → give it an exam → only install it if it passes.**
+
 | Stage | What happens |
 |---|---|
 | **1. Describe** | `reap-lab init` asks what your model does all day and drafts a **domain pack** — your workload as weighted domains (bookkeeping categorization, code review, ticket triage, whatever you actually run). |
@@ -35,7 +96,7 @@ Expert pruning is one-shot and cheap — Cerebras's REAP removes 25–50% of exp
 
 ## The gates (nothing ships without clearing these)
 
-Defaults, all tunable per sweep. Blocking gates stop promotion; advisory gates are reported.
+These are the pass/fail rules. A shrunk model that fails any blocking gate **does not get installed**, no matter how good it looks on average. Defaults below, all tunable per sweep.
 
 | Gate | Default | Why |
 |---|---|---|
