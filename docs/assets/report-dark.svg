@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 380" width="880" height="380" role="img">
+<rect width="880" height="380" rx="10" fill="#1a1a19"/>
+<text x="28" y="34" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="17" font-weight="600" fill="#ffffff" text-anchor="start">How the winner is chosen</text>
+<text x="28" y="56" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#c3c2b7" text-anchor="start">Every shrunk model is scored against the original. Miss a gate — it is not installed.</text>
+<line x1="90" y1="288.7" x2="640" y2="288.7" stroke="#2c2c2a" stroke-width="1"/>
+<text x="80" y="292.6666666666667" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" font-weight="400" fill="#898781" text-anchor="end">85%</text>
+<line x1="90" y1="232.0" x2="640" y2="232.0" stroke="#2c2c2a" stroke-width="1"/>
+<text x="80" y="236.0" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" font-weight="400" fill="#898781" text-anchor="end">90%</text>
+<line x1="90" y1="175.3" x2="640" y2="175.3" stroke="#2c2c2a" stroke-width="1"/>
+<text x="80" y="179.33333333333331" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" font-weight="400" fill="#898781" text-anchor="end">95%</text>
+<line x1="90" y1="118.7" x2="640" y2="118.7" stroke="#2c2c2a" stroke-width="1"/>
+<text x="80" y="122.66666666666669" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" font-weight="400" fill="#898781" text-anchor="end">100%</text>
+<text x="151.11111111111111" y="320" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" font-weight="400" fill="#898781" text-anchor="middle">24</text>
+<text x="273.3333333333333" y="320" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" font-weight="400" fill="#898781" text-anchor="middle">28</text>
+<text x="395.55555555555554" y="320" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" font-weight="400" fill="#898781" text-anchor="middle">32</text>
+<text x="517.7777777777778" y="320" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" font-weight="400" fill="#898781" text-anchor="middle">36</text>
+<text x="640.0" y="320" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" font-weight="400" fill="#898781" text-anchor="middle">40</text>
+<line x1="90" y1="300.0" x2="640" y2="300.0" stroke="#383835" stroke-width="1"/>
+<text x="365.0" y="342" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="400" fill="#c3c2b7" text-anchor="middle">Memory it needs (GB) — smaller is better</text>
+<g transform="translate(30,198) rotate(-90)"><text x="0" y="0" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="400" fill="#c3c2b7" text-anchor="middle">Quality vs the original</text></g>
+<rect x="90" y="175.3" width="550" height="124.7" fill="#d03b3b" opacity="0.06"/>
+<line x1="90" y1="175.3" x2="640" y2="175.3" stroke="#d03b3b" stroke-width="1.5" stroke-dasharray="5 3"/>
+<text x="636" y="167.33333333333331" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11.5" font-weight="600" fill="#d03b3b" text-anchor="end">95% quality gate</text>
+<text x="636" y="292" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" font-weight="400" fill="#d03b3b" text-anchor="end" opacity="0.85">below the line: not installed</text>
+<circle cx="551.4" cy="118.7" r="7.5" fill="#898781" stroke="#1a1a19" stroke-width="2"/>
+<text x="537.3888888888889" y="116.66666666666669" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="600" fill="#ffffff" text-anchor="end">The original</text>
+<text x="537.3888888888889" y="132.66666666666669" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11.5" font-weight="600" fill="#898781" text-anchor="end">the yardstick</text>
+<circle cx="355.8" cy="128.9" r="7.5" fill="#0ca30c" stroke="#1a1a19" stroke-width="2"/>
+<text x="369.8333333333333" y="126.86666666666673" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="600" fill="#ffffff" text-anchor="start">Keep 75%</text>
+<text x="369.8333333333333" y="142.86666666666673" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11.5" font-weight="600" fill="#0ca30c" text-anchor="start">✓ PASS — installed</text>
+<circle cx="258.1" cy="178.7" r="7.5" fill="#d03b3b" stroke="#1a1a19" stroke-width="2"/>
+<text x="272.05555555555554" y="176.7333333333333" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="600" fill="#ffffff" text-anchor="start">Keep 62.5%</text>
+<text x="272.05555555555554" y="192.7333333333333" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11.5" font-weight="600" fill="#d03b3b" text-anchor="start">✗ FAIL</text>
+<circle cx="163.3" cy="247.9" r="7.5" fill="#d03b3b" stroke="#1a1a19" stroke-width="2"/>
+<text x="177.3333333333333" y="245.86666666666673" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="600" fill="#ffffff" text-anchor="start">Keep 50%</text>
+<text x="177.3333333333333" y="261.86666666666673" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11.5" font-weight="600" fill="#d03b3b" text-anchor="start">✗ FAIL</text>
+<path d="M244.05555555555554 208.7333333333333 L254.05555555555554 187.7333333333333" stroke="#898781" stroke-width="1" fill="none" stroke-dasharray="3 3"/>
+<text x="240.05555555555554" y="218.7333333333333" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11.5" font-weight="400" fill="#898781" text-anchor="end">0.3 points short — rejected</text>
+<rect x="668" y="96" width="184" height="204" rx="8" fill="#212120" stroke="rgba(255,255,255,0.10)" stroke-width="1"/>
+<text x="682" y="120" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="600" fill="#ffffff" text-anchor="start">Every gate must pass</text>
+<circle cx="688" cy="142" r="3" fill="#3987e5"/>
+<text x="700" y="146" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="400" fill="#c3c2b7" text-anchor="start">Quality ≥ 95%</text>
+<circle cx="688" cy="166" r="3" fill="#3987e5"/>
+<text x="700" y="170" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="400" fill="#c3c2b7" text-anchor="start">No domain collapses</text>
+<circle cx="688" cy="190" r="3" fill="#3987e5"/>
+<text x="700" y="194" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="400" fill="#c3c2b7" text-anchor="start">Fits your VRAM</text>
+<circle cx="688" cy="214" r="3" fill="#3987e5"/>
+<text x="700" y="218" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="400" fill="#c3c2b7" text-anchor="start">Tool calls still valid</text>
+<circle cx="688" cy="238" r="3" fill="#3987e5"/>
+<text x="700" y="242" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="400" fill="#c3c2b7" text-anchor="start">No new refusals</text>
+<circle cx="688" cy="262" r="3" fill="#3987e5"/>
+<text x="700" y="266" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="400" fill="#c3c2b7" text-anchor="start">Still refuses the bad</text>
+<text x="28" y="364" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11.5" font-weight="400" fill="#898781" text-anchor="start">Numbers from `reap-lab demo` — a synthetic model, so you can see the shape of the decision before spending anything.</text>
+</svg>

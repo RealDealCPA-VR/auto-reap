@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 306" width="880" height="306" role="img">
+<rect width="880" height="306" rx="10" fill="#1a1a19"/>
+<text x="28" y="34" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="17" font-weight="600" fill="#ffffff" text-anchor="start">Will it fit on your GPU?</text>
+<text x="28" y="56" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#c3c2b7" text-anchor="start">Qwen3-30B — estimated weights-only size. Smaller is better.</text>
+<line x1="250.0" y1="80" x2="250.0" y2="248" stroke="#2c2c2a" stroke-width="1"/>
+<text x="250.0" y="264" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" font-weight="400" fill="#898781" text-anchor="middle">0 GB</text>
+<line x1="419.2" y1="80" x2="419.2" y2="248" stroke="#2c2c2a" stroke-width="1"/>
+<text x="419.2307692307692" y="264" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" font-weight="400" fill="#898781" text-anchor="middle">20 GB</text>
+<line x1="588.5" y1="80" x2="588.5" y2="248" stroke="#2c2c2a" stroke-width="1"/>
+<text x="588.4615384615385" y="264" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" font-weight="400" fill="#898781" text-anchor="middle">40 GB</text>
+<line x1="757.7" y1="80" x2="757.7" y2="248" stroke="#2c2c2a" stroke-width="1"/>
+<text x="757.6923076923077" y="264" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" font-weight="400" fill="#898781" text-anchor="middle">60 GB</text>
+<line x1="453.1" y1="70" x2="453.1" y2="248" stroke="#c3c2b7" stroke-width="1.5" stroke-dasharray="4 3"/>
+<text x="459.0769230769231" y="66" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11.5" font-weight="600" fill="#c3c2b7" text-anchor="start">24 GB — a typical gaming GPU</text>
+<text x="236" y="110" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#ffffff" text-anchor="end">Original, uncompressed</text>
+<rect x="250" y="92" width="516.2" height="26" rx="4" fill="#3987e5"/>
+<text x="756.1538461538462" y="110" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#0b0b0b" text-anchor="end">61 GB</text>
+<text x="236" y="152" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#ffffff" text-anchor="end">Original, compressed</text>
+<rect x="250" y="134" width="160.8" height="26" rx="4" fill="#3987e5"/>
+<text x="400.7692307692308" y="152" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#0b0b0b" text-anchor="end">19 GB</text>
+<text x="236" y="194" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#ffffff" text-anchor="end">Pruned to 75% + compressed</text>
+<rect x="250" y="176" width="126.9" height="26" rx="4" fill="#3987e5"/>
+<text x="366.9230769230769" y="194" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#0b0b0b" text-anchor="end">15 GB</text>
+<text x="386.9230769230769" y="194" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11.5" font-weight="400" fill="#898781" text-anchor="start">← the sweep winner</text>
+<text x="236" y="236" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#ffffff" text-anchor="end">Pruned to 50% + compressed</text>
+<rect x="250" y="218" width="101.5" height="26" rx="4" fill="#3987e5"/>
+<text x="341.53846153846155" y="236" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#0b0b0b" text-anchor="end">12 GB</text>
+<text x="28" y="290" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11.5" font-weight="400" fill="#898781" text-anchor="start">Sizes are standard estimates; your model and quantization will differ.</text>
+</svg>

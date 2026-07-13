@@ -2,9 +2,20 @@
 
 ### Make a big AI model small enough to run on your own computer — and prove it's still good at *your* job before you trust it.
 
+[![tests](https://github.com/RealDealCPA-VR/auto-reap/actions/workflows/tests.yml/badge.svg)](https://github.com/RealDealCPA-VR/auto-reap/actions/workflows/tests.yml)
+![tests: 563](https://img.shields.io/badge/tests-563%20passing-0ca30c)
+![python](https://img.shields.io/badge/python-3.11%2B-2a78d6)
+![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-52514e)
+![license](https://img.shields.io/badge/license-MIT-52514e)
+
 Some of the best open AI models are built like a **consulting firm of 128 specialists**. Every question goes to just a handful of them — but you still have to keep all 128 in the building, which is why these models need a data-center graphics card and won't run on yours.
 
 Here's the thing: **most of those specialists never touch your work.** If you do bookkeeping, the poetry expert sits idle all day. You're paying rent on people you never call.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/experts-dark.svg">
+  <img alt="128 experts shaded by how often your workload activates them; the 32 never used are removed, leaving 96 — about 61 GB down to about 15 GB." src="docs/assets/experts-light.svg" width="100%">
+</picture>
 
 **`reap-lab` finds out which specialists your work actually uses, lets the rest go, and then re-interviews the smaller firm to prove it still does your job as well as the big one did.**
 
@@ -12,7 +23,10 @@ You end up with a model that fits on your machine, runs faster, and comes with *
 
 ### What you actually get
 
-Taking a well-known model (Qwen3-30B) as the example:
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/fit-dark.svg">
+  <img alt="Bar chart: the original model needs about 61 GB and won't fit a 24 GB gaming GPU; compressed it is 19 GB; pruned to 75% and compressed it is 15 GB; pruned to 50% it is 12 GB." src="docs/assets/fit-light.svg" width="100%">
+</picture>
 
 | | Before | After (keep 75% of experts, compressed) |
 |---|---|---|
@@ -25,6 +39,15 @@ Two honest caveats, because this tool's whole point is not overselling:
 
 - **The sizes are estimates** (standard rules of thumb — see the [VRAM table](docs/QUICKSTART.md#vram-reality-table)); the exact numbers depend on your model.
 - **The quality figure is a *rule*, not a promise.** reap-lab doesn't claim your shrunk model will hit 95% — it *measures* what it actually hits, and refuses to install it if it falls short. Sometimes the answer is "cutting this model in half broke it," and the report will tell you so plainly.
+
+### How it decides what's safe to install
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/report-dark.svg">
+  <img alt="Scatter plot of quality versus memory. Keeping 75% of experts scores 99.1% and passes. Keeping 62.5% scores 94.7% — 0.3 points below the 95% gate — and is rejected. Keeping 50% scores 88.6% and is rejected." src="docs/assets/report-light.svg" width="100%">
+</picture>
+
+Note the middle candidate: it missed the quality bar by **three tenths of a point** and was thrown out anyway. That's the whole idea — the rules decide, not your optimism.
 
 ### See it work in 60 seconds
 
@@ -84,6 +107,17 @@ Expert pruning is one-shot and cheap — Cerebras's REAP removes 25–50% of exp
 ## What it does
 
 The whole pipeline in one line: **describe your work → make practice questions → shrink the model → give it an exam → only install it if it passes.**
+
+```mermaid
+flowchart LR
+    A["🗒️ Describe<br/>your workload"] --> B["✍️ Generate<br/>practice + exam questions"]
+    B --> C["✂️ Prune<br/>drop unused experts"]
+    C --> D["📦 Convert<br/>to the file you run"]
+    D --> E["🎓 Evaluate<br/>on the real runtime"]
+    E --> F{"🚦 Gates<br/>all pass?"}
+    F -->|yes| G["✅ Install<br/>into LM Studio"]
+    F -->|no| H["🛑 Rejected<br/>report says why"]
+```
 
 | Stage | What happens |
 |---|---|
