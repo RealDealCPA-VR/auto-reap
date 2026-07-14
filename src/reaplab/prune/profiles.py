@@ -48,6 +48,18 @@ REMOTE_WORKDIR = "reap-work"
 #: Escape hatch for the local-offload Windows block (see LocalOffloadProfile).
 ALLOW_LOCAL_OFFLOAD_ENV = "REAPLAB_ALLOW_LOCAL_OFFLOAD"
 
+
+def is_windows() -> bool:
+    """Platform check behind a function ON PURPOSE.
+
+    Tests that need to exercise the Windows branch must patch THIS, never
+    ``os.name``: pathlib picks its flavour from ``os.name`` at construction, so
+    faking it globally makes every subsequent ``Path()`` try to build a
+    ``WindowsPath`` on Linux — which takes down the whole pytest session, not just
+    the test doing the faking.
+    """
+    return os.name == "nt"
+
 _SAFE_TOKEN = re.compile(r"^[A-Za-z0-9_@%+=:,./\-]+$")
 
 #: Any ``HF_TOKEN=<value>`` occurrence in a rendered command line. Secrets must never
@@ -316,7 +328,7 @@ class LocalOffloadProfile(ExecutionProfile):
         if (out_dir / "config.json").exists():
             return out_dir  # already produced (resume)
 
-        if os.name == "nt" and os.environ.get(ALLOW_LOCAL_OFFLOAD_ENV) != "1":
+        if is_windows() and os.environ.get(ALLOW_LOCAL_OFFLOAD_ENV) != "1":
             raise PrerequisiteError(
                 "execution_profile: local-offload cannot run on Windows.\n"
                 "REAP's pinned environment requires vllm (plus its CUDA torch build), which "

@@ -46,7 +46,7 @@ class TestWindowsGuard:
     def test_windows_refuses_with_alternatives(self, tmp_path: Path, monkeypatch):
         """reap's env pins vllm (no Windows wheels): say so before `uv sync` burns minutes."""
         monkeypatch.delenv(ALLOW_LOCAL_OFFLOAD_ENV, raising=False)
-        monkeypatch.setattr(profiles.os, "name", "nt")
+        monkeypatch.setattr(profiles, "is_windows", lambda: True)
         monkeypatch.setattr(
             profiles.shutil,
             "which",
@@ -62,7 +62,7 @@ class TestWindowsGuard:
 
     def test_env_override_allows_it(self, tmp_path: Path, monkeypatch):
         monkeypatch.setenv(ALLOW_LOCAL_OFFLOAD_ENV, "1")
-        monkeypatch.setattr(profiles.os, "name", "nt")
+        monkeypatch.setattr(profiles, "is_windows", lambda: True)
         monkeypatch.setattr(profiles.shutil, "which", lambda name: None)
         spec = make_spec(tmp_path, profile="local-offload")
         # gets past the platform guard and fails on the NEXT check (git), not the OS
@@ -71,7 +71,7 @@ class TestWindowsGuard:
 
     def test_resume_short_circuits_before_the_guard(self, tmp_path: Path, monkeypatch):
         monkeypatch.delenv(ALLOW_LOCAL_OFFLOAD_ENV, raising=False)
-        monkeypatch.setattr(profiles.os, "name", "nt")
+        monkeypatch.setattr(profiles, "is_windows", lambda: True)
         spec = make_spec(tmp_path, profile="local-offload")
         out_dir = tmp_path / "out"
         out_dir.mkdir()
@@ -253,3 +253,18 @@ class TestFindPrunedCheckpoint:
     def test_nothing_found_is_instructive(self, tmp_path: Path):
         with pytest.raises(PruneError, match="pruned_models"):
             profiles._find_pruned_checkpoint(tmp_path)
+
+
+def test_no_test_fakes_windows_by_mutating_os_name():
+    """Guard against the CI-killer: patching os.name (rather than profiles.is_windows)
+    makes pathlib construct WindowsPath objects on Linux, which crashes pytest itself —
+    the failing test cannot even be reported. Fake the platform via is_windows()."""
+    from pathlib import Path as _P
+
+    offenders = [
+        f"{p.name}:{n}"
+        for p in (_P(__file__).parent.parent).rglob("test_*.py")
+        for n, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1)
+        if 'setattr(os, "name"' in line or 'setattr(profiles.os, "name"' in line
+    ]
+    assert not offenders, f"patch profiles.is_windows instead of os.name: {offenders}"
