@@ -36,3 +36,12 @@ def mock_provider():
     from reaplab.core.providers import get_provider
 
     return get_provider(ProviderCfg(kind="mock"))
+
+
+@pytest.fixture(autouse=True)
+def _wide_terminal(monkeypatch):
+    """Rich decides its width from COLUMNS / the terminal, so CLI output wraps
+    differently on a dev box, in Docker, and on a CI runner — which silently breaks
+    substring assertions on rendered output. Pin a wide terminal for every test so
+    what we assert on is our text, not Rich's line-breaking."""
+    monkeypatch.setenv("COLUMNS", "200")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import yaml
@@ -12,6 +13,21 @@ from reaplab.cli.main import app
 
 runner = CliRunner()
 
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def plain(result) -> str:
+    """CLI output with ANSI codes stripped and wrapping collapsed.
+
+    Rich picks its width from the terminal and its color mode from the environment,
+    so rendered output differs between a dev box, Docker, and a CI runner: it wraps
+    mid-phrase and injects escape codes between tokens. Assertions on raw `.output`
+    therefore test Rich's layout, not our text. Normalize first.
+    """
+    text = getattr(result, "output", result)
+    return " ".join(_ANSI.sub("", text).split())
+
+
 ALL_COMMANDS = [
     "version", "demo", "init", "doctor", "generate", "audit",
     "sweep", "report", "promote", "prune", "convert", "eval", "status",
@@ -19,10 +35,15 @@ ALL_COMMANDS = [
 
 
 def test_root_help_lists_every_command():
+    """Registered commands are checked by introspection, not by scraping rendered
+    help — Rich wraps/truncates by terminal width, so the text is environment-
+    dependent while the command registry is not."""
+    import typer
+
+    assert set(typer.main.get_command(app).commands) == set(ALL_COMMANDS)
+
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    for cmd in ALL_COMMANDS:
-        assert cmd in result.output
 
 
 def test_every_command_help_exits_zero():
@@ -34,7 +55,7 @@ def test_every_command_help_exits_zero():
 def test_version():
     result = runner.invoke(app, ["version"])
     assert result.exit_code == 0
-    assert "reap-lab" in result.output
+    assert "reap-lab" in plain(result)
 
 
 def test_init_yes_mock_writes_loadable_yamls(tmp_path):
@@ -69,7 +90,7 @@ def test_init_rejects_unknown_provider(tmp_path):
 def test_doctor_runs():
     result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0
-    assert "reap-lab doctor" in result.output
+    assert "reap-lab doctor" in plain(result)
 
 
 def test_doctor_with_bad_spec_reports_fail(tmp_path):
@@ -77,7 +98,7 @@ def test_doctor_with_bad_spec_reports_fail(tmp_path):
     bad.write_text("model_id: [not, a, string]\ndomain_pack: 42\n", encoding="utf-8")
     result = runner.invoke(app, ["doctor", str(bad)])
     assert result.exit_code == 0  # non-strict never hard-exits
-    assert "FAIL" in result.output
+    assert "FAIL" in plain(result)
     strict = runner.invoke(app, ["doctor", str(bad), "--strict"])
     assert strict.exit_code == 1
 
@@ -142,7 +163,7 @@ def test_generate_then_audit(tmp_path):
     spec_path = _mini_spec(tmp_path)
     gen = runner.invoke(app, ["generate", spec_path])
     assert gen.exit_code == 0, gen.output
-    assert "calibration" in gen.output
+    assert "calibration" in plain(gen)
     # datasets are per-sweep: they live under runs/<config_hash>/data (C1)
     data_dir = _data_dir(spec_path)
     assert (data_dir / "eval_v1.jsonl").exists()
@@ -155,7 +176,7 @@ def test_audit_before_generate_instructs(tmp_path):
     spec_path = _mini_spec(tmp_path)
     result = runner.invoke(app, ["audit", spec_path])
     assert result.exit_code == 1
-    assert "generate" in result.output
+    assert "generate" in plain(result)
 
 
 def _sentinel_eval_set(spec_path: str) -> None:
@@ -182,7 +203,7 @@ def test_eval_reuses_the_audited_dataset(tmp_path):
     gguf.write_bytes(b"GGUF" + b"\x00" * 64)
     result = runner.invoke(app, ["eval", spec_path, "--gguf", str(gguf)])
     assert result.exit_code == 0, result.output
-    flat = " ".join(result.output.split())  # rich wraps the table title
+    flat = plain(result)
     assert "(1 items)" in flat, "eval regenerated the dataset instead of reusing it"
     assert (_data_dir(spec_path) / "eval_v1.jsonl").read_text(
         encoding="utf-8"
@@ -204,7 +225,7 @@ def test_sweep_report_status_flow(tmp_path):
     spec_path = _mini_spec(tmp_path)
     sweep = runner.invoke(app, ["sweep", spec_path])
     assert sweep.exit_code == 0, sweep.output
-    assert "Report:" in sweep.output
+    assert "Report:" in plain(sweep)
 
     report = runner.invoke(app, ["report", spec_path])
     assert report.exit_code == 0, report.output
@@ -226,15 +247,15 @@ def test_report_runs_no_new_work(tmp_path, monkeypatch):
     monkeypatch.setattr(orch, "run_sweep", boom)
     result = runner.invoke(app, ["report", spec_path])
     assert result.exit_code == 0, result.output
-    assert "Report:" in result.output
+    assert "Report:" in plain(result)
 
 
 def test_report_before_any_sweep_is_instructive(tmp_path):
     spec_path = _mini_spec(tmp_path)
     result = runner.invoke(app, ["report", spec_path])
     assert result.exit_code == 1
-    assert "Nothing has been evaluated yet" in result.output
-    assert "reap-lab sweep" in result.output
+    assert "Nothing has been evaluated yet" in plain(result)
+    assert "reap-lab sweep" in plain(result)
 
 
 def test_promote_places_the_winner_and_accepts_an_artifact_override(tmp_path):
@@ -256,24 +277,24 @@ def test_promote_unknown_artifact_exits_one(tmp_path):
     assert runner.invoke(app, ["sweep", spec_path]).exit_code == 0
     result = runner.invoke(app, ["promote", spec_path, "--artifact", "nope-q4_k_m"])
     assert result.exit_code == 1
-    assert "nope-q4_k_m" in result.output
+    assert "nope-q4_k_m" in plain(result)
 
 
 def test_promote_before_any_sweep_exits_one(tmp_path):
     spec_path = _mini_spec(tmp_path)
     result = runner.invoke(app, ["promote", spec_path])
     assert result.exit_code == 1
-    assert "reap-lab sweep" in result.output
+    assert "reap-lab sweep" in plain(result)
 
 
 def test_prune_and_convert_commands(tmp_path):
     spec_path = _mini_spec(tmp_path)
     prune = runner.invoke(app, ["prune", spec_path, "--retention", "0.75"])
     assert prune.exit_code == 0, prune.output
-    assert "r0.75-q4_k_m" in prune.output
+    assert "r0.75-q4_k_m" in plain(prune)
     convert = runner.invoke(app, ["convert", spec_path])
     assert convert.exit_code == 0, convert.output
-    assert "baseline-q4_k_m" in convert.output
+    assert "baseline-q4_k_m" in plain(convert)
 
 
 def test_eval_standalone_gguf(tmp_path):
@@ -282,7 +303,7 @@ def test_eval_standalone_gguf(tmp_path):
     gguf.write_bytes(b"GGUF" + b"\x00" * 64)
     result = runner.invoke(app, ["eval", spec_path, "--gguf", str(gguf)])
     assert result.exit_code == 0, result.output
-    assert "classify" in result.output
+    assert "classify" in plain(result)
 
 
 def test_invalid_spec_fails_cleanly(tmp_path):
@@ -290,4 +311,4 @@ def test_invalid_spec_fails_cleanly(tmp_path):
     bad.write_text("retention: [2.0]\n", encoding="utf-8")
     result = runner.invoke(app, ["sweep", str(bad)])
     assert result.exit_code == 1
-    assert "Invalid sweep spec" in result.output
+    assert "Invalid sweep spec" in plain(result)

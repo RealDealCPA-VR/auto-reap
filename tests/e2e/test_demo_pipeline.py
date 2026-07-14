@@ -4,11 +4,28 @@ vehicle (real GPU runs are the user's milestone M2+)."""
 
 from __future__ import annotations
 
+import re
+
 from typer.testing import CliRunner
 
 from reaplab.cli.main import app
 
 runner = CliRunner()
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def plain(result) -> str:
+    """CLI output with ANSI codes stripped and wrapping collapsed.
+
+    Rich picks its width from the terminal and its color mode from the environment,
+    so rendered output differs between a dev box, Docker, and a CI runner: it wraps
+    mid-phrase and injects escape codes between tokens. Assertions on raw `.output`
+    therefore test Rich's layout, not our text. Normalize first.
+    """
+    text = getattr(result, "output", result)
+    return " ".join(_ANSI.sub("", text).split())
+
 
 
 def test_demo_end_to_end_with_promotion(tmp_path):
@@ -77,7 +94,7 @@ def test_report_command_is_a_true_rerender(tmp_path):
     before = stable(report.read_text(encoding="utf-8"))
     result = runner.invoke(app, ["report", str(ws / "demo-sweep.yaml")])
     assert result.exit_code == 0, result.output
-    assert "Report:" in result.output
+    assert "Report:" in plain(result)
     assert stable(report.read_text(encoding="utf-8")) == before
     # a re-render touches no dataset/artifact stage, so nothing new appears on disk
     assert len(list((ws / "workspace" / "reports").glob("sweep-*.md"))) == 1
@@ -94,7 +111,7 @@ def test_demo_is_deterministic_and_resumable(tmp_path):
     # regenerated from completed stages (timestamps differ; strip the date line)
     second = runner.invoke(app, ["demo", "--workspace", str(ws), "--no-show-report"])
     assert second.exit_code == 0, second.output
-    assert "reusing" in second.output
+    assert "reusing" in plain(second)
     second_md = report.read_text(encoding="utf-8")
 
     def stable(md: str) -> str:

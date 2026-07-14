@@ -160,16 +160,21 @@ def test_failed_section_empty_says_none(spec, pack, rows):
 
 def test_promotion_footer_matches_the_real_cli(md):
     """[33]/[m1]/[m23]: the footer must be a command the CLI actually accepts."""
-    from typer.testing import CliRunner
+    import typer
 
     from reaplab.cli.main import app
 
     assert "uv run reap-lab promote <your-sweep.yaml>" in md
     assert "--artifact <artifact-id>" in md
     assert "--artifact r0.75-q4_k_m" not in md  # the old, non-existent form
-    # ...and --artifact really exists on the promote command
-    help_text = CliRunner().invoke(app, ["promote", "--help"]).output
-    assert "--artifact" in help_text
+
+    # ...and --artifact really exists on the promote command. Introspect the click
+    # command rather than scraping `--help`: rendered help is Rich's layout, which
+    # varies with terminal width and color mode across machines (it wraps and can
+    # truncate). Asserting on it tests Rich, not our CLI contract.
+    promote_cmd = typer.main.get_command(app).commands["promote"]
+    flags = {opt for param in promote_cmd.params for opt in param.opts}
+    assert "--artifact" in flags
 
 
 def test_notes_section_surfaces_row_caveats(spec, pack, rows):
