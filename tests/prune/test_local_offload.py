@@ -261,10 +261,13 @@ def test_no_test_fakes_windows_by_mutating_os_name():
     the failing test cannot even be reported. Fake the platform via is_windows()."""
     from pathlib import Path as _P
 
+    # built at runtime so this guard does not match its own source
+    needle = 'setattr(' + 'os, "name"'
     offenders = [
-        f"{p.name}:{n}"
-        for p in (_P(__file__).parent.parent).rglob("test_*.py")
-        for n, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1)
-        if 'setattr(os, "name"' in line or 'setattr(profiles.os, "name"' in line
+        f"{path.name}:{n}"
+        for path in _P(__file__).parent.parent.rglob("test_*.py")
+        if path.name != _P(__file__).name
+        for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if needle in line.replace("profiles.", "")
     ]
     assert not offenders, f"patch profiles.is_windows instead of os.name: {offenders}"
